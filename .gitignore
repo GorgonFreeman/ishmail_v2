@@ -3,3 +3,16 @@
 .env.*
 !.env.example
 node_modules/
+.creds.yml
+.outlook_tokens/
+__pycache__/
+*.pyc
+.Python
+.venv/
+venv/
+backend/.venv/
+frontend/dist/
+frontend/node_modules/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/

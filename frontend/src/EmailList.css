@@ -1,0 +1,128 @@
+.emailList {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #e2d8c8;
+}
+
+.emailRow {
+  display: grid;
+  grid-template-columns: 36px minmax(140px, 200px) 1fr auto 48px;
+  gap: 0.65rem;
+  align-items: center;
+  padding: 0.55rem 1rem;
+  border-bottom: 1px solid #ebe3d5;
+  background: #fbf8f2;
+}
+
+.emailRow:hover {
+  background: #f3ede2;
+}
+
+.emailRow.isSelected {
+  background: #e8f0e4;
+}
+
+.emailRow.isFlagged .subjectText {
+  font-weight: 650;
+}
+
+.rowCheck {
+  display: grid;
+  place-items: center;
+}
+
+.rowSender {
+  color: #1f4d3a;
+  font-weight: 600;
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowSender:hover {
+  text-decoration: underline;
+}
+
+.rowSender.muted {
+  color: #6b6154;
+  font-weight: 500;
+  pointer-events: none;
+}
+
+.rowSubject {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.subjectText {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #2a241c;
+}
+
+.rowDate {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  color: #8a7f70;
+}
+
+.rowActions {
+  display: flex;
+  gap: 0.2rem;
+}
+
+.iconBtn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: #5c5347;
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+
+.iconBtn:hover {
+  background: #e7dfd0;
+  color: #2a241c;
+}
+
+.iconBtn.danger:hover {
+  background: #f0d7d0;
+  color: #8a2f1f;
+}
+
+.rowDupes {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85rem;
+  color: #6b6154;
+  font-weight: 600;
+}
+
+.emptyState {
+  padding: 3rem 1rem;
+  text-align: center;
+  color: #8a7f70;
+}
+
+@media (max-width: 720px) {
+  .emailRow {
+    grid-template-columns: 28px 1fr auto 40px;
+    grid-template-areas:
+      'check sender actions dupes'
+      'check subject subject subject';
+  }
+  .rowCheck { grid-area: check; }
+  .rowSender { grid-area: sender; }
+  .rowSubject { grid-area: subject; }
+  .rowActions { grid-area: actions; }
+  .rowDupes { grid-area: dupes; }
+  .rowDate { display: none; }
+}

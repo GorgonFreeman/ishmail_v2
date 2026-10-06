@@ -1,0 +1,28 @@
+names:
+  - John
+  - Martin
+  - John Martin
+
+outlook:
+  example:
+    email: example@outlook.com
+    auth: oauth
+    client_id: ________-____-____-____-____________
+yahoo:
+  example:
+    email: example@yahoo.com
+    password: ________________________
+    app_password: ____________________
+gmail:
+  example:
+    email: example@gmail.com
+    app_password: ____________________
+platform:
+  key:
+    email: key@platform.com
+    password: ________________________
+    app_password: ____________________
+    imap_host: mail.platform.com
+    imap_port: 993
+    smtp_host: smtp.platform.com
+    smtp_port: 587

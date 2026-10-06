@@ -1,0 +1,233 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;650;700&family=IBM+Plex+Mono:wght@500&display=swap');
+
+:root {
+  color: #2a241c;
+  background:
+    radial-gradient(1200px 500px at 10% -10%, #e8efe4 0%, transparent 55%),
+    radial-gradient(900px 400px at 100% 0%, #f0e6d4 0%, transparent 50%),
+    #f4efe6;
+  font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+  line-height: 1.4;
+  font-weight: 450;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.appShell {
+  min-height: 100vh;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding-bottom: 3rem;
+}
+
+.pageHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+  padding: 1.25rem 1rem 0.75rem;
+}
+
+.brand {
+  margin: 0;
+  font-size: 1.85rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: #1f4d3a;
+}
+
+.senderTitle {
+  margin: 0.25rem 0 0;
+  font-size: 1.25rem;
+  font-weight: 650;
+  word-break: break-all;
+}
+
+.subtle {
+  margin: 0.2rem 0 0;
+  color: #7a7164;
+  font-size: 0.9rem;
+}
+
+.backLink {
+  color: #1f4d3a;
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 550;
+}
+
+.backLink:hover { text-decoration: underline; }
+
+.headerActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  justify-content: flex-end;
+}
+
+.stickyBar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.65rem 1rem;
+  background: rgba(247, 243, 236, 0.92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid #ddd2bf;
+  border-top: 1px solid #ddd2bf;
+}
+
+.selectionCount {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  min-width: 5.5rem;
+  color: #5c5347;
+}
+
+.barSpacer { flex: 1; }
+
+.searchForm { display: flex; }
+
+.searchInput {
+  width: min(260px, 42vw);
+  border: 1px solid #d5cbb8;
+  background: #fffdf8;
+  border-radius: 6px;
+  padding: 0.4rem 0.65rem;
+  font: inherit;
+  color: inherit;
+}
+
+.searchInput:focus {
+  outline: 2px solid #7aa88f;
+  border-color: transparent;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+  color: #5c5347;
+  cursor: pointer;
+  user-select: none;
+}
+
+.btn {
+  appearance: none;
+  border: 1px solid #cfc3ae;
+  background: #fffdf8;
+  color: #2a241c;
+  border-radius: 6px;
+  padding: 0.38rem 0.7rem;
+  font: inherit;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  background: #efe8db;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn.primary {
+  background: #1f4d3a;
+  border-color: #1f4d3a;
+  color: #f7f3ec;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: #173b2d;
+}
+
+.btn.ghost {
+  background: transparent;
+}
+
+.btn.danger {
+  border-color: #d4a89c;
+  color: #8a2f1f;
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: #f5e2dc;
+}
+
+.errorBanner {
+  margin: 0.75rem 1rem;
+  padding: 0.65rem 0.8rem;
+  background: #f8e6e0;
+  border: 1px solid #e2b6aa;
+  border-radius: 6px;
+  color: #6d2c1c;
+  font-size: 0.9rem;
+}
+
+.jobToast {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  width: min(320px, calc(100vw - 2rem));
+}
+
+.jobItem {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.65rem;
+  align-items: baseline;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  background: #2a241c;
+  color: #f7f3ec;
+  font-size: 0.82rem;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+}
+
+.jobItem.status-completed {
+  background: #1f4d3a;
+}
+
+.jobItem.status-failed {
+  background: #8a2f1f;
+}
+
+.jobError {
+  flex-basis: 100%;
+  opacity: 0.9;
+}
+
+@media (max-width: 720px) {
+  .pageHeader {
+    flex-direction: column;
+  }
+  .stickyBar {
+    position: sticky;
+    bottom: 0;
+    top: auto;
+    border-top: 1px solid #ddd2bf;
+  }
+}
