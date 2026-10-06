@@ -50,13 +50,43 @@ class MailService:
     def invalidate_cache(self):
         self._cache = None
 
-    def fetch_all(self, force: bool = False) -> tuple[list[MessageInfo], list[str]]:
+    def fetch_all(
+        self,
+        force: bool = False,
+        progress_cb=None,
+    ) -> tuple[list[MessageInfo], list[str]]:
+        accounts = self.accounts()
+        total = len(accounts)
+
         if self._cache is not None and not force:
+            if progress_cb:
+                progress_cb({
+                    'done': total,
+                    'total': total,
+                    'current': None,
+                    'account_key': None,
+                    'cached': True,
+                })
             return self._cache, self._cache_errors
 
         messages: list[MessageInfo] = []
         errors: list[str] = []
-        for acc in self.accounts():
+        if progress_cb:
+            progress_cb({
+                'done': 0,
+                'total': total,
+                'current': None,
+                'account_key': None,
+            })
+
+        for i, acc in enumerate(accounts):
+            if progress_cb:
+                progress_cb({
+                    'done': i,
+                    'total': total,
+                    'current': acc.email,
+                    'account_key': acc.key,
+                })
             try:
                 client = self.get_client(acc.key)
                 inbox = client.list_messages(client.inbox_folder, archived=False)
@@ -64,6 +94,14 @@ class MailService:
                 if client.archive_folder:
                     archived = client.list_messages(client.archive_folder, archived=True)
                     messages.extend(archived)
+                if progress_cb:
+                    progress_cb({
+                        'done': i + 1,
+                        'total': total,
+                        'current': acc.email,
+                        'account_key': acc.key,
+                        'ok': True,
+                    })
             except Exception as e:
                 errors.append(f'{acc.key}: {e}')
                 # Drop dead client so next attempt reconnects
@@ -74,6 +112,15 @@ class MailService:
                             dead.close()
                         except Exception:
                             pass
+                if progress_cb:
+                    progress_cb({
+                        'done': i + 1,
+                        'total': total,
+                        'current': acc.email,
+                        'account_key': acc.key,
+                        'ok': False,
+                        'error': str(e),
+                    })
 
         self._cache = messages
         self._cache_errors = errors

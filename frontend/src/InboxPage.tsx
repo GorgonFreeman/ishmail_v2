@@ -7,15 +7,52 @@ import { AccountPickerModal } from './Modal'
 type Props = {
   accounts: Account[],
   watch: (job: Job) => void,
+  fetchJob: Job | null,
+  fetching: boolean,
+  mailReady: boolean,
+  onRefresh: () => Promise<unknown>,
+  refreshPending: boolean,
 }
 
-export function InboxPage({ accounts, watch }: Props) {
+function FetchProgress({ job }: { job: Job | null }) {
+  const done = typeof job?.progress?.done === 'number' ? job.progress.done : 0
+  const total = typeof job?.progress?.total === 'number' ? job.progress.total : 0
+  const current =
+    typeof job?.progress?.current === 'string' && job.progress.current
+      ? job.progress.current
+      : typeof job?.progress?.account_key === 'string'
+        ? job.progress.account_key
+        : null
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0
+  const label = total > 0
+    ? `Loading mail… ${done}/${total}${current ? ` — ${current}` : ''}`
+    : 'Loading mail across inboxes…'
+
+  return (
+    <div className="fetchProgress">
+      <p className="fetchProgressLabel">{label}</p>
+      <div className="fetchProgressTrack" aria-hidden>
+        <div className="fetchProgressBar" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  )
+}
+
+export function InboxPage({
+  accounts,
+  watch,
+  fetchJob,
+  fetching,
+  mailReady,
+  onRefresh,
+  refreshPending,
+}: Props) {
   const [archived, setArchived] = useState(false)
   const [q, setQ] = useState('')
   const [search, setSearch] = useState('')
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const { data, isLoading, error, refetch, isFetching } = useEmails(archived, search)
-  const { startAction, refresh } = useMailActions(watch)
+  const { data, isLoading, error, isFetching } = useEmails(archived, search, mailReady)
+  const { startAction } = useMailActions(watch)
   const [modal, setModal] = useState<null | {
     title: string,
     confirmLabel: string,
@@ -62,6 +99,8 @@ export function InboxPage({ accounts, watch }: Props) {
   }
 
   const hasSelection = selectedIds.size > 0
+  const showInitialProgress = (fetching || !mailReady) && !data
+  const showList = Boolean(data)
 
   return (
     <div className="page">
@@ -77,10 +116,9 @@ export function InboxPage({ accounts, watch }: Props) {
           <button
             type="button"
             className="btn ghost"
-            disabled={isFetching || refresh.isPending}
-            onClick={async () => {
-              await refresh.mutateAsync()
-              refetch()
+            disabled={refreshPending || isFetching}
+            onClick={() => {
+              void onRefresh()
             }}
           >
             Refresh
@@ -146,14 +184,27 @@ export function InboxPage({ accounts, watch }: Props) {
         </label>
       </div>
 
+      {fetching && data && (
+        <div className="fetchProgressBanner">
+          <FetchProgress job={fetchJob} />
+        </div>
+      )}
+
       {data?.errors?.length ? (
         <div className="errorBanner">
           Some accounts failed: {data.errors.join(' · ')}
         </div>
       ) : null}
       {error && <div className="errorBanner">{(error as Error).message}</div>}
-      {isLoading && <div className="emptyState">Loading mail across inboxes…</div>}
-      {!isLoading && (
+      {showInitialProgress && (
+        <div className="emptyState">
+          <FetchProgress job={fetchJob} />
+        </div>
+      )}
+      {mailReady && isLoading && !data && (
+        <div className="emptyState">Grouping mail…</div>
+      )}
+      {showList && (
         <EmailList
           emails={emails}
           selectedIds={selectedIds}

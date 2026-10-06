@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { InboxPage } from './InboxPage'
 import { SenderPage } from './SenderPage'
-import { useAccounts, useTrackJob } from './hooks'
+import { useAccounts, useFetchMail, useTrackJob } from './hooks'
 import './App.css'
 
 const queryClient = new QueryClient({
@@ -17,6 +17,7 @@ const queryClient = new QueryClient({
 function Shell() {
   const { data, isLoading, error } = useAccounts()
   const { activeJobs, watch } = useTrackJob()
+  const { fetchJob, fetching, ready, refresh } = useFetchMail(watch, activeJobs)
   const accounts = data?.accounts || []
 
   return (
@@ -29,6 +30,9 @@ function Shell() {
               <span>{j.status}</span>
               {j.progress && typeof j.progress.done === 'number' && (
                 <span>{String(j.progress.done)}/{String(j.progress.total ?? '?')}</span>
+              )}
+              {typeof j.progress?.current === 'string' && j.progress.current && (
+                <span className="jobCurrent">{String(j.progress.current)}</span>
               )}
               {j.error && <span className="jobError">{j.error.split('\n')[0]}</span>}
             </div>
@@ -44,8 +48,30 @@ function Shell() {
       )}
       {!isLoading && !error && (
         <Routes>
-          <Route path="/" element={<InboxPage accounts={accounts} watch={watch} />} />
-          <Route path="/sender/:senderEmail" element={<SenderPage accounts={accounts} watch={watch} />} />
+          <Route
+            path="/"
+            element={
+              <InboxPage
+                accounts={accounts}
+                watch={watch}
+                fetchJob={fetchJob}
+                fetching={fetching}
+                mailReady={ready}
+                onRefresh={() => refresh.mutateAsync()}
+                refreshPending={refresh.isPending || fetching}
+              />
+            }
+          />
+          <Route
+            path="/sender/:senderEmail"
+            element={
+              <SenderPage
+                accounts={accounts}
+                watch={watch}
+                mailReady={ready}
+              />
+            }
+          />
         </Routes>
       )}
     </div>

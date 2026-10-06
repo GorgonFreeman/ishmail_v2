@@ -220,6 +220,54 @@ body {
   opacity: 0.9;
 }
 
+.jobCurrent {
+  flex-basis: 100%;
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fetchProgress {
+  width: min(420px, 100%);
+  margin: 0 auto;
+  text-align: left;
+}
+
+.fetchProgressLabel {
+  margin: 0 0 0.55rem;
+  font-size: 0.95rem;
+  color: #5c5347;
+  word-break: break-word;
+}
+
+.fetchProgressTrack {
+  height: 8px;
+  border-radius: 999px;
+  background: #e2d8c8;
+  overflow: hidden;
+}
+
+.fetchProgressBar {
+  height: 100%;
+  border-radius: inherit;
+  background: #1f4d3a;
+  transition: width 0.25s ease;
+}
+
+.fetchProgressBanner {
+  margin: 0.75rem 1rem 0;
+  padding: 0.7rem 0.85rem;
+  background: rgba(247, 243, 236, 0.95);
+  border: 1px solid #ddd2bf;
+  border-radius: 8px;
+}
+
+.fetchProgressBanner .fetchProgress {
+  margin: 0;
+  width: 100%;
+}
+
 @media (max-width: 720px) {
   .pageHeader {
     flex-direction: column;

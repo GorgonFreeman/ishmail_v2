@@ -139,6 +139,25 @@ def sender_emails(sender_email: str, refresh: bool = Query(False)):
     }
 
 
+@app.post('/api/jobs/fetch')
+def start_fetch(force: bool = Query(True)):
+    """Background multi-account fetch with per-inbox progress."""
+    total = len(mail_service.accounts())
+
+    def run(job):
+        def progress_cb(p):
+            job.progress = p
+
+        messages, errors = mail_service.fetch_all(force=force, progress_cb=progress_cb)
+        return {
+            'total_messages': len(messages),
+            'errors': errors,
+        }
+
+    job = queue.submit('fetch', run, progress={'done': 0, 'total': total})
+    return job.to_dict()
+
+
 @app.post('/api/jobs/action')
 def start_action(body: ActionRequest):
     if body.action not in ('delete', 'archive', 'star', 'unstar'):

@@ -9,16 +9,17 @@ import type { Job } from './api'
 type Props = {
   accounts: Account[],
   watch: (job: Job) => void,
+  mailReady: boolean,
 }
 
 function msgKey(m: Message) {
   return `${m.account_key}|${m.folder}|${m.uid}`
 }
 
-export function SenderPage({ accounts, watch }: Props) {
+export function SenderPage({ accounts, watch, mailReady }: Props) {
   const { senderEmail = '' } = useParams()
   const decoded = decodeURIComponent(senderEmail)
-  const { data, isLoading, error, refetch, isFetching } = useSender(decoded)
+  const { data, isLoading, error, refetch, isFetching } = useSender(decoded, mailReady)
   const { startAction, unsubscribe, deleteSender } = useMailActions(watch)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [modal, setModal] = useState<null | {
@@ -133,9 +134,10 @@ export function SenderPage({ accounts, watch }: Props) {
         >Delete</button>
       </div>
 
-      {isLoading && <div className="emptyState">Loading…</div>}
+      {!mailReady && <div className="emptyState">Waiting for mail fetch…</div>}
+      {mailReady && isLoading && <div className="emptyState">Loading…</div>}
       {error && <div className="errorBanner">{(error as Error).message}</div>}
-      {!isLoading && (
+      {mailReady && !isLoading && (
         <SenderMessageList
           messages={messages}
           selected={selected}

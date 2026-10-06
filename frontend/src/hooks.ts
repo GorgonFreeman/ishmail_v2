@@ -2,11 +2,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, type Job, type MessageRef } from './api'
 
-export function useEmails(archived: boolean, q: string) {
+export function useEmails(archived: boolean, q: string, enabled = true) {
   return useQuery({
     queryKey: ['emails', archived, q],
     queryFn: () => api.emails({ archived, q: q || undefined }),
     refetchInterval: 60_000,
+    enabled,
   })
 }
 
@@ -17,11 +18,11 @@ export function useAccounts() {
   })
 }
 
-export function useSender(email: string | undefined) {
+export function useSender(email: string | undefined, enabled = true) {
   return useQuery({
     queryKey: ['sender', email],
     queryFn: () => api.sender(email!),
-    enabled: Boolean(email),
+    enabled: Boolean(email) && enabled,
   })
 }
 
@@ -64,7 +65,6 @@ export function useTrackJob() {
         } else {
           timers.current.delete(job.id)
           invalidateMail()
-          // keep completed jobs visible briefly
           window.setTimeout(() => {
             setActiveJobs(prev => prev.filter(j => j.id !== job.id || j.status === 'failed'))
           }, 4_000)
@@ -84,6 +84,45 @@ export function useTrackJob() {
   }, [])
 
   return { activeJobs, watch }
+}
+
+/** Start a background fetch on mount; Refresh forces a full re-fetch. */
+export function useFetchMail(watch: (job: Job) => void, activeJobs: Job[]) {
+  const [fetchJobId, setFetchJobId] = useState<string | null>(null)
+  const [ready, setReady] = useState(false)
+  const started = useRef(false)
+
+  const startFetch = useCallback(async (force: boolean) => {
+    const job = await api.startFetch(force)
+    setFetchJobId(job.id)
+    watch(job)
+    return job
+  }, [watch])
+
+  useEffect(() => {
+    if (started.current) return
+    started.current = true
+    startFetch(false).catch(() => setReady(true))
+  }, [startFetch])
+
+  const fetchJob = activeJobs.find(j => j.id === fetchJobId) ?? null
+
+  useEffect(() => {
+    if (!fetchJob) return
+    if (fetchJob.status === 'completed' || fetchJob.status === 'failed') {
+      setReady(true)
+    }
+  }, [fetchJob])
+
+  const fetching =
+    Boolean(fetchJob) &&
+    (fetchJob!.status === 'pending' || fetchJob!.status === 'running')
+
+  const refresh = useMutation({
+    mutationFn: () => startFetch(true),
+  })
+
+  return { fetchJob, fetching, ready, refresh }
 }
 
 export function useMailActions(watch: (job: Job) => void) {
@@ -108,9 +147,5 @@ export function useMailActions(watch: (job: Job) => void) {
     onSuccess: (job) => watch(job),
   })
 
-  const refresh = useMutation({
-    mutationFn: () => api.refresh(),
-  })
-
-  return { startAction, unsubscribe, deleteSender, refresh }
+  return { startAction, unsubscribe, deleteSender }
 }
