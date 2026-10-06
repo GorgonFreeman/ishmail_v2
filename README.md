@@ -34,15 +34,10 @@ python auth_cli.py outlook/your_account_name
 
 ## Run
 
-Two terminals:
+From the repo root (starts API + UI):
 
 ```bash
-# API  (from backend/)
-source .venv/bin/activate
-uvicorn main:app --reload --port 8000
-
-# UI   (from frontend/)
-npm run dev
+./run
 ```
 
 Open http://localhost:5173 — the Vite proxy forwards `/api` to the backend.

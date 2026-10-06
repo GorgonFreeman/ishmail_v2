@@ -71,7 +71,11 @@ def load_creds(path: str | Path | None = None) -> CredsConfig:
                 continue
 
             email = cfg['email']
-            password = cfg.get('app_password') or cfg.get('password') or ''
+            # Prefer app_password; strip spaces (Gmail shows app passwords as
+            # "xxxx xxxx xxxx xxxx" — IMAP accepts either, but spaced form has
+            # caused flaky AUTH with some servers/clients).
+            raw_password = cfg.get('app_password') or cfg.get('password') or ''
+            password = str(raw_password).replace(' ', '').strip()
             client_id = cfg.get('client_id') or os.environ.get('ISHMAIL_OUTLOOK_CLIENT_ID')
             auth = (cfg.get('auth') or '').strip().lower()
             if not auth:

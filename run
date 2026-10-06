@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Start API (8000) + UI (5173) from the ishmail_v2 repo root.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+
+VENV="$ROOT/backend/.venv"
+if [[ ! -x "$VENV/bin/uvicorn" ]]; then
+  echo "Missing backend venv. From repo root:" >&2
+  echo "  python3.13 -m venv backend/.venv" >&2
+  echo "  backend/.venv/bin/pip install -r backend/requirements.txt" >&2
+  exit 1
+fi
+
+if [[ ! -d "$ROOT/frontend/node_modules" ]]; then
+  echo "Missing frontend/node_modules — run: (cd frontend && npm install)" >&2
+  exit 1
+fi
+
+if [[ ! -f "$ROOT/.creds.yml" ]]; then
+  echo "Missing .creds.yml — copy .creds.sample.yml and edit it." >&2
+  exit 1
+fi
+
+pids=()
+cleanup() {
+  for pid in "${pids[@]:-}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+echo "API  http://127.0.0.1:8000"
+echo "UI   http://127.0.0.1:5173"
+echo
+
+(
+  cd "$ROOT/backend"
+  exec "$VENV/bin/uvicorn" main:app --reload --host 127.0.0.1 --port 8000
+) &
+pids+=($!)
+
+(
+  cd "$ROOT/frontend"
+  exec npm run dev -- --host 127.0.0.1 --port 5173
+) &
+pids+=($!)
+
+wait

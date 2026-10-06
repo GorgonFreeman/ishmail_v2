@@ -3,19 +3,34 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections import defaultdict
-from typing import Iterable
 
-from client import AccountClient, ConnectError, MessageInfo
+from client import AccountClient, MessageInfo
 from config import Account, CredsConfig, load_creds
 from unsubscribe import attempt_unsubscribe
+
+
+def _friendly_error(account: Account, exc: BaseException) -> str:
+    msg = str(exc)
+    low = msg.lower()
+    if 'basic authentication is disabled' in low or (
+        account.provider.lower() in ('outlook', 'hotmail') and 'login failed' in low
+    ):
+        return (
+            f'{msg} — Outlook/Hotmail need OAuth (auth: oauth + client_id), '
+            f'then: python auth_cli.py {account.key}'
+        )
+    return msg
 
 
 class MailService:
     def __init__(self):
         self._creds: CredsConfig | None = None
         self._clients: dict[str, AccountClient] = {}
-        self._lock = threading.Lock()
+        # Serialize all IMAP use — IMAPClient is not thread-safe, and the job
+        # queue can run alongside request handlers.
+        self._imap_lock = threading.RLock()
         self._cache: list[MessageInfo] | None = None
         self._cache_errors: list[str] = []
 
@@ -35,17 +50,34 @@ class MailService:
     def account_map(self) -> dict[str, Account]:
         return {a.key: a for a in self.accounts()}
 
+    def _drop_client_unlocked(self, account_key: str):
+        dead = self._clients.pop(account_key, None)
+        if dead:
+            try:
+                dead.close()
+            except Exception:
+                pass
+
+    def _get_client_unlocked(self, account_key: str) -> AccountClient:
+        client = self._clients.get(account_key)
+        if client is not None:
+            try:
+                client.ensure_alive()
+                return client
+            except Exception:
+                self._drop_client_unlocked(account_key)
+
+        acc = self.account_map().get(account_key)
+        if not acc:
+            raise KeyError(f'Unknown account {account_key}')
+        client = AccountClient(acc)
+        client.connect()
+        self._clients[account_key] = client
+        return client
+
     def get_client(self, account_key: str) -> AccountClient:
-        with self._lock:
-            if account_key in self._clients:
-                return self._clients[account_key]
-            acc = self.account_map().get(account_key)
-            if not acc:
-                raise KeyError(f'Unknown account {account_key}')
-            client = AccountClient(acc)
-            client.connect()
-            self._clients[account_key] = client
-            return client
+        with self._imap_lock:
+            return self._get_client_unlocked(account_key)
 
     def invalidate_cache(self):
         self._cache = None
@@ -88,12 +120,18 @@ class MailService:
                     'account_key': acc.key,
                 })
             try:
-                client = self.get_client(acc.key)
-                inbox = client.list_messages(client.inbox_folder, archived=False)
-                messages.extend(inbox)
-                if client.archive_folder:
-                    archived = client.list_messages(client.archive_folder, archived=True)
-                    messages.extend(archived)
+                with self._imap_lock:
+                    client = self._get_client_unlocked(acc.key)
+                    inbox = client.list_messages(client.inbox_folder, archived=False)
+                    messages.extend(inbox)
+                    if client.archive_folder:
+                        archived = client.list_messages(
+                            client.archive_folder, archived=True,
+                        )
+                        messages.extend(archived)
+                    # Close after each account so we don't hold ~15 idle IMAP
+                    # sessions (providers drop them → NONAUTH on reuse).
+                    self._drop_client_unlocked(acc.key)
                 if progress_cb:
                     progress_cb({
                         'done': i + 1,
@@ -103,15 +141,9 @@ class MailService:
                         'ok': True,
                     })
             except Exception as e:
-                errors.append(f'{acc.key}: {e}')
-                # Drop dead client so next attempt reconnects
-                with self._lock:
-                    dead = self._clients.pop(acc.key, None)
-                    if dead:
-                        try:
-                            dead.close()
-                        except Exception:
-                            pass
+                errors.append(f'{acc.key}: {_friendly_error(acc, e)}')
+                with self._imap_lock:
+                    self._drop_client_unlocked(acc.key)
                 if progress_cb:
                     progress_cb({
                         'done': i + 1,
@@ -121,6 +153,9 @@ class MailService:
                         'ok': False,
                         'error': str(e),
                     })
+            # Brief pause between accounts to reduce provider rate-limits
+            if i + 1 < total:
+                time.sleep(0.35)
 
         self._cache = messages
         self._cache_errors = errors
@@ -165,17 +200,18 @@ class MailService:
         for (account_key, folder), bucket in by_bucket.items():
             uids = [m.uid for m in bucket]
             try:
-                client = self.get_client(account_key)
-                if action == 'delete':
-                    client.trash_messages(folder, uids)
-                elif action == 'archive':
-                    client.archive_messages(folder, uids)
-                elif action == 'star':
-                    client.set_flagged(folder, uids, True)
-                elif action == 'unstar':
-                    client.set_flagged(folder, uids, False)
-                else:
-                    raise ValueError(f'Unknown action {action}')
+                with self._imap_lock:
+                    client = self._get_client_unlocked(account_key)
+                    if action == 'delete':
+                        client.trash_messages(folder, uids)
+                    elif action == 'archive':
+                        client.archive_messages(folder, uids)
+                    elif action == 'star':
+                        client.set_flagged(folder, uids, True)
+                    elif action == 'unstar':
+                        client.set_flagged(folder, uids, False)
+                    else:
+                        raise ValueError(f'Unknown action {action}')
                 results.append({
                     'account_key': account_key,
                     'folder': folder,
@@ -183,6 +219,8 @@ class MailService:
                     'ok': True,
                 })
             except Exception as e:
+                with self._imap_lock:
+                    self._drop_client_unlocked(account_key)
                 results.append({
                     'account_key': account_key,
                     'folder': folder,
@@ -226,17 +264,18 @@ class MailService:
             header = None
             post = None
             try:
-                client = self.get_client(account_key)
-                for sample in samples:
-                    headers = client.get_headers(
-                        sample.folder,
-                        sample.uid,
-                        ['List-Unsubscribe', 'List-Unsubscribe-Post'],
-                    )
-                    if headers.get('list-unsubscribe'):
-                        header = headers['list-unsubscribe']
-                        post = headers.get('list-unsubscribe-post')
-                        break
+                with self._imap_lock:
+                    client = self._get_client_unlocked(account_key)
+                    for sample in samples:
+                        headers = client.get_headers(
+                            sample.folder,
+                            sample.uid,
+                            ['List-Unsubscribe', 'List-Unsubscribe-Post'],
+                        )
+                        if headers.get('list-unsubscribe'):
+                            header = headers['list-unsubscribe']
+                            post = headers.get('list-unsubscribe-post')
+                            break
                 if not header:
                     results.append({
                         'account_key': account_key,
@@ -253,6 +292,8 @@ class MailService:
                         'detail': detail,
                     })
             except Exception as e:
+                with self._imap_lock:
+                    self._drop_client_unlocked(account_key)
                 results.append({
                     'account_key': account_key,
                     'ok': False,

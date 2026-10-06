@@ -72,7 +72,8 @@ def _is_connection_error(exc: BaseException) -> bool:
         msg = str(exc).lower()
         needles = (
             'socket', 'connection', 'timed out', 'timeout', 'broken pipe',
-            'reset by peer', 'eof', 'not connected', 'server closed', 'bye', 'gone',
+            'reset by peer', 'eof', 'not connected', 'server closed', 'bye',
+            'gone', 'nonauth', 'illegal in state', 'logged out',
         )
         return any(n in msg for n in needles)
     cause = getattr(exc, '__cause__', None) or getattr(exc, '__context__', None)
@@ -92,6 +93,18 @@ class AccountClient:
     def connect(self):
         self._open()
         self._discover_folders()
+
+    def ensure_alive(self):
+        """NOOP (or reconnect). Call before reusing a long-lived client."""
+        if self.conn is None:
+            self.connect()
+            return
+        try:
+            self.conn.noop()
+        except Exception:
+            self._reconnect()
+            if self.archive_folder is None and self.trash_folder is None:
+                self._discover_folders()
 
     def _open(self):
         try:
@@ -122,7 +135,13 @@ class AccountClient:
             raise
         except Exception as e:
             self.conn = None
-            raise ConnectError(f'{self.account.label}: {e}') from e
+            msg = str(e)
+            if 'basic authentication is disabled' in msg.lower():
+                msg += (
+                    ' — set auth: oauth and client_id for this Outlook account, '
+                    f'then run: python auth_cli.py {self.account.key}'
+                )
+            raise ConnectError(f'{self.account.label}: {msg}') from e
 
     def _reconnect(self):
         if self.conn:
@@ -149,7 +168,12 @@ class AccountClient:
     def _discover_folders(self):
         try:
             folders = self.conn.list_folders()
-        except IMAPClientError:
+        except IMAPClientError as e:
+            # Auth/connection failures must not be swallowed — otherwise later
+            # EXAMINE fails with a cryptic NONAUTH error.
+            msg = str(e).lower()
+            if any(n in msg for n in ('nonauth', 'auth', 'login', 'illegal in state')):
+                raise ConnectError(f'{self.account.label}: {e}') from e
             folders = []
 
         names = []
