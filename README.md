@@ -49,9 +49,10 @@ Open http://localhost:5173 — the Vite proxy forwards `/api` to the backend.
 
 ## Creds
 
-`.creds.yml` is gitignored. Top-level `names:` is an array of personal name
-strings stripped from subjects before grouping, so e.g. `Your order, John`
-and `Your order, Martin` collapse into one row.
+`.creds.yml` is gitignored. Top-level `names:` seeds subject dedupe: when a
+title mentions one of those names, ishmail builds a regex with a name-slot
+wildcard and groups any other title that matches — including names you have
+not listed (e.g. `Your order, John` finds `Your order, Priya`).
 
 ## Behaviour notes
 
