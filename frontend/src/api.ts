@@ -48,6 +48,20 @@ export type Job = {
   error: string | null,
 }
 
+export type MessageDetail = {
+  account_key: string,
+  account_email: string,
+  folder: string,
+  uid: number,
+  date: string,
+  from_email: string,
+  from_name: string,
+  subject: string,
+  flagged: boolean,
+  body_text: string,
+  body_html: string | null,
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
@@ -81,6 +95,14 @@ export const api = {
       messages: Message[],
       errors: string[],
     }>(`/api/senders/${encodeURIComponent(email)}${params}`)
+  },
+  message: (ref: MessageRef) => {
+    const params = new URLSearchParams({
+      account_key: ref.account_key,
+      folder: ref.folder,
+      uid: String(ref.uid),
+    })
+    return request<MessageDetail>(`/api/message?${params}`)
   },
   startAction: (body: {
     action: string,

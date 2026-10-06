@@ -79,6 +79,14 @@ class MailService:
         with self._imap_lock:
             return self._get_client_unlocked(account_key)
 
+    def get_message_detail(self, account_key: str, folder: str, uid: int) -> dict:
+        with self._imap_lock:
+            client = self._get_client_unlocked(account_key)
+            detail = client.get_message_detail(folder, uid)
+            # Don't leave connections idle after a one-off read
+            self._drop_client_unlocked(account_key)
+            return detail
+
     def invalidate_cache(self):
         self._cache = None
 

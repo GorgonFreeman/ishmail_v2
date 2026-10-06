@@ -26,6 +26,17 @@ export function useSender(email: string | undefined, enabled = true) {
   })
 }
 
+export function useMessageDetail(
+  ref: MessageRef | null | undefined,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ['message', ref?.account_key, ref?.folder, ref?.uid],
+    queryFn: () => api.message(ref!),
+    enabled: Boolean(ref) && enabled,
+  })
+}
+
 export function useJobs() {
   return useQuery({
     queryKey: ['jobs'],

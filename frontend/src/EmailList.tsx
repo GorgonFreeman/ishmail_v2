@@ -16,12 +16,14 @@ function formatDate(iso: string) {
 type RowProps = {
   group: EmailGroup,
   selected: boolean,
+  archivedView: boolean,
   onToggle: () => void,
   onAction: (action: string, group: EmailGroup) => void,
 }
 
-export function EmailRow({ group, selected, onToggle, onAction }: RowProps) {
+export function EmailRow({ group, selected, archivedView, onToggle, onAction }: RowProps) {
   const senderLabel = group.from_name || group.from_email
+  const detailTo = `/email/${encodeURIComponent(group.id)}${archivedView ? '?archived=true' : ''}`
 
   return (
     <div className={`emailRow ${selected ? 'isSelected' : ''} ${group.flagged ? 'isFlagged' : ''}`}>
@@ -36,7 +38,7 @@ export function EmailRow({ group, selected, onToggle, onAction }: RowProps) {
         {senderLabel}
       </Link>
       <div className="rowSubject" title={group.subject}>
-        <span className="subjectText">{group.subject}</span>
+        <Link className="subjectText" to={detailTo}>{group.subject}</Link>
         <span className="rowDate">{formatDate(group.date)}</span>
       </div>
       <div className="rowActions">
@@ -60,11 +62,18 @@ export function EmailRow({ group, selected, onToggle, onAction }: RowProps) {
 type ListProps = {
   emails: EmailGroup[],
   selectedIds: Set<string>,
+  archivedView?: boolean,
   onToggle: (id: string) => void,
   onAction: (action: string, group: EmailGroup) => void,
 }
 
-export function EmailList({ emails, selectedIds, onToggle, onAction }: ListProps) {
+export function EmailList({
+  emails,
+  selectedIds,
+  archivedView = false,
+  onToggle,
+  onAction,
+}: ListProps) {
   if (!emails.length) {
     return <div className="emptyState">No emails match this view.</div>
   }
@@ -75,6 +84,7 @@ export function EmailList({ emails, selectedIds, onToggle, onAction }: ListProps
           key={g.id}
           group={g}
           selected={selectedIds.has(g.id)}
+          archivedView={archivedView}
           onToggle={() => onToggle(g.id)}
           onAction={onAction}
         />

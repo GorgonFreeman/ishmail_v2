@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import type { Account, EmailGroup, Job, MessageRef } from './api'
 import { EmailList } from './EmailList'
 import { useEmails, useMailActions } from './hooks'
@@ -47,7 +48,14 @@ export function InboxPage({
   onRefresh,
   refreshPending,
 }: Props) {
-  const [archived, setArchived] = useState(false)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const archived = searchParams.get('archived') === 'true'
+  const setArchived = (value: boolean) => {
+    const next = new URLSearchParams(searchParams)
+    if (value) next.set('archived', 'true')
+    else next.delete('archived')
+    setSearchParams(next, { replace: true })
+  }
   const [q, setQ] = useState('')
   const [search, setSearch] = useState('')
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
@@ -208,6 +216,7 @@ export function InboxPage({
         <EmailList
           emails={emails}
           selectedIds={selectedIds}
+          archivedView={archived}
           onToggle={toggle}
           onAction={onRowAction}
         />

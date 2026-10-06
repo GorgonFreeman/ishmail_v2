@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { EmailDetailPage } from './EmailDetailPage'
 import { InboxPage } from './InboxPage'
 import { SenderPage } from './SenderPage'
 import { useAccounts, useFetchMail, useTrackJob } from './hooks'
@@ -66,6 +67,16 @@ function Shell() {
             path="/sender/:senderEmail"
             element={
               <SenderPage
+                accounts={accounts}
+                watch={watch}
+                mailReady={ready}
+              />
+            }
+          />
+          <Route
+            path="/email/:groupId"
+            element={
+              <EmailDetailPage
                 accounts={accounts}
                 watch={watch}
                 mailReady={ready}

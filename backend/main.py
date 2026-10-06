@@ -110,6 +110,21 @@ def list_emails(
     }
 
 
+@app.get('/api/message')
+def message_detail(
+    account_key: str = Query(...),
+    folder: str = Query(...),
+    uid: int = Query(...),
+):
+    try:
+        detail = mail_service.get_message_detail(account_key, folder, uid)
+    except KeyError:
+        raise HTTPException(404, f'Unknown account {account_key}') from None
+    except Exception as e:
+        raise HTTPException(502, str(e)) from e
+    return detail
+
+
 @app.get('/api/senders/{sender_email}')
 def sender_emails(sender_email: str, refresh: bool = Query(False)):
     sender = sender_email.lower().strip()

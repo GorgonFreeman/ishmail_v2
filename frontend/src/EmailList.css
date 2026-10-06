@@ -63,6 +63,12 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #2a241c;
+  text-decoration: none;
+}
+
+a.subjectText:hover {
+  text-decoration: underline;
+  color: #1f4d3a;
 }
 
 .rowDate {

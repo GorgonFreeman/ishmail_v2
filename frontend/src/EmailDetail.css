@@ -1,0 +1,146 @@
+.detailPage .detailSubject {
+  margin: 0.35rem 0 0;
+  font-size: 1.35rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: #2a241c;
+  line-height: 1.3;
+}
+
+.detailMain {
+  margin: 0 1rem 1rem;
+  padding: 1rem 1.1rem 1.25rem;
+  background: #fffdf8;
+  border: 1px solid #e2d8c8;
+  border-radius: 10px;
+}
+
+.detailMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.85rem;
+  align-items: baseline;
+  margin-bottom: 0.65rem;
+}
+
+.detailSender {
+  font-weight: 650;
+  color: #1f4d3a;
+  text-decoration: none;
+}
+
+.detailSender:hover {
+  text-decoration: underline;
+}
+
+.detailFromEmail,
+.detailDate,
+.detailAccount {
+  font-size: 0.88rem;
+  color: #7a7164;
+}
+
+.detailRowActions {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.85rem;
+}
+
+.detailBodyText {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+  font-size: 0.95rem;
+  line-height: 1.55;
+  color: #2a241c;
+}
+
+.dupeSection {
+  margin: 0 1rem 2rem;
+}
+
+.dupeBar {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 0.9rem;
+  border: 1px solid #d5cbb8;
+  border-radius: 8px;
+  background: #f3ede2;
+  color: #2a241c;
+  font: inherit;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.dupeBar:hover {
+  background: #ebe3d5;
+}
+
+.dupeBarCount {
+  font-weight: 500;
+  color: #6b6154;
+  font-size: 0.9rem;
+}
+
+.dupeList {
+  list-style: none;
+  margin: 0.45rem 0 0;
+  padding: 0;
+  border: 1px solid #e2d8c8;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fffdf8;
+}
+
+.dupeRow {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid #ebe3d5;
+}
+
+.dupeRow:last-child {
+  border-bottom: 0;
+}
+
+.dupeInfo {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.dupeAccount {
+  font-weight: 600;
+  color: #1f4d3a;
+  font-size: 0.9rem;
+}
+
+.dupeSubject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #2a241c;
+  font-size: 0.92rem;
+}
+
+.dupeMeta {
+  font-size: 0.8rem;
+  color: #8a7f70;
+}
+
+@media (max-width: 720px) {
+  .dupeRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .dupeRow .rowActions {
+    justify-content: flex-end;
+  }
+}

@@ -297,6 +297,49 @@ class AccountClient:
 
         return self._call(op)
 
+    def get_message_detail(self, folder: str, uid: int) -> dict:
+        """Fetch envelope fields + a plain-text body preview for one message."""
+        def op():
+            self.conn.select_folder(folder, readonly=True)
+            data = self.conn.fetch([uid], ['ENVELOPE', 'FLAGS', 'INTERNALDATE', 'RFC822'])
+            if uid not in data:
+                raise RuntimeError(f'Message {uid} not found in {folder}')
+            item = data[uid]
+            env = item.get(b'ENVELOPE')
+            flags = item.get(b'FLAGS', ())
+            idate = item.get(b'INTERNALDATE')
+            raw = item.get(b'RFC822') or b''
+
+            from_email, from_name = 'unknown@unknown', ''
+            if env and env.from_:
+                f = env.from_[0]
+                mailbox = f.mailbox.decode() if f.mailbox else 'unknown'
+                host = f.host.decode() if f.host else 'unknown'
+                from_email = f'{mailbox}@{host}'
+                from_name = f.name.decode(errors='replace') if f.name else ''
+
+            subject = ''
+            if env and env.subject:
+                subject = _decode_maybe(env.subject)
+
+            body_text, body_html = _extract_bodies(raw)
+
+            return {
+                'account_key': self.account.key,
+                'account_email': self.account.email,
+                'folder': folder,
+                'uid': uid,
+                'date': (idate or datetime.min).isoformat(),
+                'from_email': from_email.lower(),
+                'from_name': from_name,
+                'subject': subject or '(no subject)',
+                'flagged': b'\\Flagged' in flags,
+                'body_text': body_text,
+                'body_html': body_html,
+            }
+
+        return self._call(op)
+
     def set_flagged(self, folder: str, uids: list[int], flagged: bool):
         def op():
             self.conn.select_folder(folder)
@@ -344,3 +387,56 @@ def _decode_maybe(raw_bytes: bytes) -> str:
         return out
     except Exception:
         return raw_bytes.decode(errors='replace')
+
+
+def _decode_part_payload(part) -> str:
+    raw = part.get_payload(decode=True)
+    if raw is None:
+        payload = part.get_payload()
+        return payload if isinstance(payload, str) else ''
+    charset = part.get_content_charset() or 'utf-8'
+    try:
+        return raw.decode(charset, errors='replace')
+    except LookupError:
+        return raw.decode('utf-8', errors='replace')
+
+
+def _extract_bodies(raw: bytes) -> tuple[str, str | None]:
+    """Return (plain_text, html_or_none) from an RFC822 blob."""
+    from email import message_from_bytes
+
+    if not raw:
+        return ('', None)
+
+    msg = message_from_bytes(raw)
+    text_parts: list[str] = []
+    html_parts: list[str] = []
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_maintype() == 'multipart':
+                continue
+            disp = (part.get('Content-Disposition') or '').lower()
+            if 'attachment' in disp:
+                continue
+            ctype = part.get_content_type()
+            if ctype == 'text/plain':
+                text_parts.append(_decode_part_payload(part))
+            elif ctype == 'text/html':
+                html_parts.append(_decode_part_payload(part))
+    else:
+        ctype = msg.get_content_type()
+        content = _decode_part_payload(msg)
+        if ctype == 'text/html':
+            html_parts.append(content)
+        else:
+            text_parts.append(content)
+
+    text = '\n\n'.join(p.strip() for p in text_parts if p and p.strip())
+    html = '\n'.join(p for p in html_parts if p and p.strip()) or None
+    if not text and html:
+        # crude fallback so the UI always has something readable
+        import re
+        text = re.sub(r'<[^>]+>', ' ', html)
+        text = re.sub(r'\s+', ' ', text).strip()
+    return (text, html)
