@@ -31,8 +31,11 @@ class MailService:
         # Serialize all IMAP use — IMAPClient is not thread-safe, and the job
         # queue can run alongside request handlers.
         self._imap_lock = threading.RLock()
+        self._cache_lock = threading.RLock()
         self._cache: list[MessageInfo] | None = None
         self._cache_errors: list[str] = []
+        self._fetching = False
+        self._fetch_generation = 0
 
     def reload_creds(self) -> CredsConfig:
         self._creds = load_creds()
@@ -88,7 +91,26 @@ class MailService:
             return detail
 
     def invalidate_cache(self):
-        self._cache = None
+        with self._cache_lock:
+            self._cache = None
+
+    def snapshot(self) -> tuple[list[MessageInfo], list[str], bool, bool, int]:
+        """Non-blocking view of whatever mail has been fetched so far.
+
+        Returns (messages, errors, fetching, has_cache, generation).
+        """
+        with self._cache_lock:
+            has_cache = self._cache is not None
+            messages = list(self._cache or [])
+            errors = list(self._cache_errors)
+            fetching = self._fetching
+            generation = self._fetch_generation
+        return messages, errors, fetching, has_cache, generation
+
+    def _publish_cache(self, messages: list[MessageInfo], errors: list[str]):
+        with self._cache_lock:
+            self._cache = list(messages)
+            self._cache_errors = list(errors)
 
     def fetch_all(
         self,
@@ -98,76 +120,115 @@ class MailService:
         accounts = self.accounts()
         total = len(accounts)
 
-        if self._cache is not None and not force:
-            if progress_cb:
-                progress_cb({
-                    'done': total,
-                    'total': total,
-                    'current': None,
-                    'account_key': None,
-                    'cached': True,
-                })
-            return self._cache, self._cache_errors
+        with self._cache_lock:
+            if self._cache is not None and not force and not self._fetching:
+                if progress_cb:
+                    progress_cb({
+                        'done': total,
+                        'total': total,
+                        'current': None,
+                        'account_key': None,
+                        'cached': True,
+                    })
+                return list(self._cache), list(self._cache_errors)
 
         messages: list[MessageInfo] = []
         errors: list[str] = []
+        with self._cache_lock:
+            self._fetching = True
+            self._fetch_generation += 1
+            generation = self._fetch_generation
+            # Stream into a fresh list so the UI fills as accounts complete.
+            self._cache = []
+            self._cache_errors = []
+
         if progress_cb:
             progress_cb({
                 'done': 0,
                 'total': total,
                 'current': None,
                 'account_key': None,
+                'generation': generation,
             })
 
-        for i, acc in enumerate(accounts):
-            if progress_cb:
-                progress_cb({
-                    'done': i,
-                    'total': total,
-                    'current': acc.email,
-                    'account_key': acc.key,
-                })
-            try:
-                with self._imap_lock:
-                    client = self._get_client_unlocked(acc.key)
-                    inbox = client.list_messages(client.inbox_folder, archived=False)
-                    messages.extend(inbox)
-                    if client.archive_folder:
-                        archived = client.list_messages(
-                            client.archive_folder, archived=True,
-                        )
-                        messages.extend(archived)
-                    # Close after each account so we don't hold ~15 idle IMAP
-                    # sessions (providers drop them → NONAUTH on reuse).
-                    self._drop_client_unlocked(acc.key)
+        try:
+            for i, acc in enumerate(accounts):
+                with self._cache_lock:
+                    if generation != self._fetch_generation:
+                        # A newer force-fetch superseded this run.
+                        break
                 if progress_cb:
                     progress_cb({
-                        'done': i + 1,
+                        'done': i,
                         'total': total,
                         'current': acc.email,
                         'account_key': acc.key,
-                        'ok': True,
+                        'generation': generation,
                     })
-            except Exception as e:
-                errors.append(f'{acc.key}: {_friendly_error(acc, e)}')
-                with self._imap_lock:
-                    self._drop_client_unlocked(acc.key)
-                if progress_cb:
-                    progress_cb({
-                        'done': i + 1,
-                        'total': total,
-                        'current': acc.email,
-                        'account_key': acc.key,
-                        'ok': False,
-                        'error': str(e),
-                    })
-            # Brief pause between accounts to reduce provider rate-limits
-            if i + 1 < total:
-                time.sleep(0.35)
+                try:
+                    with self._imap_lock:
+                        client = self._get_client_unlocked(acc.key)
+                        inbox = client.list_messages(client.inbox_folder, archived=False)
+                        messages.extend(inbox)
+                        # Publish inbox immediately so the UI can stream groups
+                        # before a huge Archive folder is scanned.
+                        self._publish_cache(messages, errors)
+                        if progress_cb:
+                            progress_cb({
+                                'done': i,
+                                'total': total,
+                                'current': acc.email,
+                                'account_key': acc.key,
+                                'phase': 'inbox',
+                                'total_messages': len(messages),
+                                'generation': generation,
+                            })
+                        if client.archive_folder:
+                            archived = client.list_messages(
+                                client.archive_folder, archived=True,
+                            )
+                            messages.extend(archived)
+                            self._publish_cache(messages, errors)
+                        # Close after each account so we don't hold ~15 idle IMAP
+                        # sessions (providers drop them → NONAUTH on reuse).
+                        self._drop_client_unlocked(acc.key)
+                    if progress_cb:
+                        progress_cb({
+                            'done': i + 1,
+                            'total': total,
+                            'current': acc.email,
+                            'account_key': acc.key,
+                            'ok': True,
+                            'phase': 'done',
+                            'total_messages': len(messages),
+                            'generation': generation,
+                        })
+                except Exception as e:
+                    errors.append(f'{acc.key}: {_friendly_error(acc, e)}')
+                    with self._imap_lock:
+                        self._drop_client_unlocked(acc.key)
+                    self._publish_cache(messages, errors)
+                    if progress_cb:
+                        progress_cb({
+                            'done': i + 1,
+                            'total': total,
+                            'current': acc.email,
+                            'account_key': acc.key,
+                            'ok': False,
+                            'error': str(e),
+                            'total_messages': len(messages),
+                            'generation': generation,
+                        })
+                # Brief pause between accounts to reduce provider rate-limits
+                if i + 1 < total:
+                    time.sleep(0.35)
 
-        self._cache = messages
-        self._cache_errors = errors
-        return messages, errors
+            self._publish_cache(messages, errors)
+            return messages, errors
+        finally:
+            with self._cache_lock:
+                if generation == self._fetch_generation:
+                    self._fetching = False
 
     def messages_for_refs(
         self,

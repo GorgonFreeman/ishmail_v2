@@ -107,7 +107,7 @@ export function InboxPage({
   }
 
   const hasSelection = selectedIds.size > 0
-  const showInitialProgress = (fetching || !mailReady) && !data
+  const showInitialProgress = (fetching || !mailReady) && emails.length === 0
   const showList = Boolean(data)
 
   return (
@@ -118,6 +118,7 @@ export function InboxPage({
           <p className="subtle">
             {data ? `${emails.length} groups · ${data.total_messages} raw` : 'Loading…'}
             {archived ? ' · archived' : ' · inbox'}
+            {(fetching || data?.fetching) ? ' · streaming…' : ''}
           </p>
         </div>
         <div className="headerActions">
@@ -192,7 +193,7 @@ export function InboxPage({
         </label>
       </div>
 
-      {fetching && data && (
+      {fetching && data && emails.length > 0 && (
         <div className="fetchProgressBanner">
           <FetchProgress job={fetchJob} />
         </div>

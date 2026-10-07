@@ -6,7 +6,7 @@ export function useEmails(archived: boolean, q: string, enabled = true) {
   return useQuery({
     queryKey: ['emails', archived, q],
     queryFn: () => api.emails({ archived, q: q || undefined }),
-    refetchInterval: 60_000,
+    refetchInterval: (query) => (query.state.data?.fetching ? 1_200 : 60_000),
     enabled,
   })
 }
@@ -66,10 +66,16 @@ export function useTrackJob() {
       return [job, ...without]
     })
 
+    let lastDone: unknown
     const poll = async () => {
       try {
         const latest = await api.job(job.id)
         setActiveJobs(prev => prev.map(j => (j.id === latest.id ? latest : j)))
+        // Streamed fetch: as each account lands, refresh the grouped list.
+        if (latest.kind === 'fetch' && latest.progress?.done !== lastDone) {
+          lastDone = latest.progress?.done
+          queryClient.invalidateQueries({ queryKey: ['emails'] })
+        }
         if (latest.status === 'pending' || latest.status === 'running') {
           const t = window.setTimeout(poll, 700)
           timers.current.set(job.id, t)
@@ -86,7 +92,7 @@ export function useTrackJob() {
       }
     }
     poll()
-  }, [invalidateMail])
+  }, [invalidateMail, queryClient])
 
   useEffect(() => {
     return () => {
@@ -122,6 +128,7 @@ export function useFetchMail(watch: (job: Job) => void, activeJobs: Job[]) {
   useEffect(() => {
     if (bootstrapped.current) return
     bootstrapped.current = true
+    setReady(true)
     startFetch(false).catch(() => setReady(true))
   }, [startFetch])
 
@@ -139,14 +146,10 @@ export function useFetchMail(watch: (job: Job) => void, activeJobs: Job[]) {
   }, [fetchJob, fetchJobId])
 
   useEffect(() => {
-    const done = activeJobs.some(
-      j => j.kind === 'fetch' && (j.status === 'completed' || j.status === 'failed'),
-    )
-    if (done) setReady(true)
     if (fetchJob?.status === 'completed' || fetchJob?.status === 'failed') {
       setReady(true)
     }
-  }, [fetchJob, activeJobs])
+  }, [fetchJob])
 
   const fetching =
     Boolean(fetchJob) &&

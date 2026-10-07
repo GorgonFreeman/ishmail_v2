@@ -90,19 +90,31 @@ def list_accounts():
     }
 
 
-@app.get('/api/emails')
-def list_emails(
-    archived: bool = Query(False),
-    q: str | None = Query(None),
-    refresh: bool = Query(False),
+_groups_cache: dict = {}
+
+
+def _emails_payload(
+    messages,
+    errors,
+    *,
+    archived: bool,
+    q: str | None,
+    fetching: bool,
+    generation: int,
 ):
-    messages, errors = mail_service.fetch_all(force=refresh)
-    groups = build_groups(
-        messages,
-        mail_service.creds.names,
-        archived_view=archived,
-        query=q,
-    )
+    cache_key = (generation, len(messages), archived, q or '')
+    cached = _groups_cache.get(cache_key)
+    if cached is not None:
+        groups = cached
+    else:
+        groups = build_groups(
+            messages,
+            mail_service.creds.names,
+            archived_view=archived,
+            query=q,
+        )
+        _groups_cache.clear()
+        _groups_cache[cache_key] = groups
     return {
         'emails': [
             {
@@ -122,7 +134,36 @@ def list_emails(
         ],
         'errors': errors,
         'total_messages': len(messages),
+        'fetching': fetching,
     }
+
+
+@app.get('/api/emails')
+def list_emails(
+    archived: bool = Query(False),
+    q: str | None = Query(None),
+    refresh: bool = Query(False),
+):
+    # Prefer the live snapshot so the UI can stream groups while a background
+    # fetch is still walking accounts. Never block this request on IMAP.
+    if refresh:
+        # Kick a background job if one isn't already running; response still
+        # comes from whatever is already in the cache.
+        start_fetch(force=True)
+
+    messages, errors, fetching, has_cache, generation = mail_service.snapshot()
+    if has_cache or fetching:
+        return _emails_payload(
+            messages,
+            errors,
+            archived=archived,
+            q=q,
+            fetching=fetching,
+            generation=generation,
+        )
+
+    # Cold start with no job yet — return empty rather than blocking.
+    return _emails_payload([], [], archived=archived, q=q, fetching=False, generation=0)
 
 
 @app.get('/api/message')
@@ -143,7 +184,11 @@ def message_detail(
 @app.get('/api/senders/{sender_email}')
 def sender_emails(sender_email: str, refresh: bool = Query(False)):
     sender = sender_email.lower().strip()
-    messages, errors = mail_service.fetch_all(force=refresh)
+    if refresh:
+        start_fetch(force=True)
+    messages, errors, _fetching, has_cache, _generation = mail_service.snapshot()
+    if not has_cache and not _fetching:
+        messages, errors = mail_service.fetch_all(force=False)
     matched = [m for m in messages if m.from_email.lower() == sender]
     matched.sort(key=lambda m: m.date, reverse=True)
     return {

@@ -36,15 +36,15 @@ def _is_word_boundary(text: str, start: int, end: int) -> bool:
     return True
 
 
-def find_name_spans(subject: str, names: list[str]) -> list[tuple[int, int]]:
+def find_name_spans(subject: str, prepared_names: list[str]) -> list[tuple[int, int]]:
     """Non-overlapping spans of known names in subject (longest match wins)."""
-    if not subject or not names:
+    if not subject or not prepared_names:
         return []
     lower = subject.casefold()
     occupied = [False] * len(subject)
     spans: list[tuple[int, int]] = []
 
-    for name in _prepared_names(names):
+    for name in prepared_names:
         needle = name.casefold()
         start = 0
         while True:
@@ -69,10 +69,13 @@ def subject_template(subject: str, names: list[str]) -> str | None:
     Replace known-name spans with NAME_SLOT. Returns None if no known name
     appears — only name-bearing subjects seed regex templates.
     """
-    spans = find_name_spans(subject, names)
+    return _subject_template_prepared(subject, _prepared_names(names))
+
+
+def _subject_template_prepared(subject: str, prepared: list[str]) -> str | None:
+    spans = find_name_spans(subject, prepared)
     if not spans:
         return None
-
     parts: list[str] = []
     cursor = 0
     for start, end in spans:
@@ -111,14 +114,30 @@ def normalize_subject(subject: str, names: list[str]) -> str:
     Strip known names (and collapse noise) for exact-ish equality when no
     template applies. Prefer subject_template + regex for cross-name matches.
     """
+    return _normalize_subject_prepared(subject, _prepared_names(names))
+
+
+def _normalize_subject_prepared(subject: str, prepared: list[str]) -> str:
     text = (subject or '').casefold()
-    for name in _prepared_names(names):
-        text = re.sub(
-            rf'(?<![a-z]){re.escape(name.casefold())}(?![a-z])',
-            ' ',
-            text,
-            flags=re.IGNORECASE,
-        )
+    for name in prepared:
+        needle = name.casefold()
+        # Fast path: plain find with word-boundary checks (avoids re.sub per name).
+        out = []
+        i = 0
+        while True:
+            idx = text.find(needle, i)
+            if idx < 0:
+                out.append(text[i:])
+                break
+            end = idx + len(needle)
+            if _is_word_boundary(text, idx, end):
+                out.append(text[i:idx])
+                out.append(' ')
+                i = end
+            else:
+                out.append(text[i:idx + 1])
+                i = idx + 1
+        text = ''.join(out)
     text = WHITESPACE_RE.sub(' ', text).strip()
     compact = NON_ALNUM_RE.sub(' ', text)
     compact = WHITESPACE_RE.sub(' ', compact).strip()
@@ -132,30 +151,6 @@ def group_key_from_template(template: str) -> str:
 
 def group_key_from_norm(norm: str) -> str:
     return 'n:' + hashlib.sha1(norm.encode()).hexdigest()[:16]
-
-
-class _UnionFind:
-    def __init__(self, n: int):
-        self.parent = list(range(n))
-        self.rank = [0] * n
-
-    def find(self, i: int) -> int:
-        while self.parent[i] != i:
-            self.parent[i] = self.parent[self.parent[i]]
-            i = self.parent[i]
-        return i
-
-    def union(self, a: int, b: int):
-        ra, rb = self.find(a), self.find(b)
-        if ra == rb:
-            return
-        if self.rank[ra] < self.rank[rb]:
-            self.parent[ra] = rb
-        elif self.rank[ra] > self.rank[rb]:
-            self.parent[rb] = ra
-        else:
-            self.parent[rb] = ra
-            self.rank[ra] += 1
 
 
 @dataclass
@@ -175,74 +170,54 @@ class EmailGroup:
 
 def assign_group_ids(subjects: list[str], names: list[str]) -> list[str]:
     """
-    Cluster subjects: seed regexes from titles that mention a known name,
-    then pull in any other title that matches those regexes (unknown names
-    included). Fall back to normalised exact match for the rest.
+    Cluster subjects by unique title then template/normalised key.
+
+    Work is O(unique_subjects × templates), not O(messages²) — important when
+    streaming large Yahoo/Gmail mailboxes into the UI.
     """
     n = len(subjects)
     if n == 0:
         return []
 
-    uf = _UnionFind(n)
-
-    # Seed templates from subjects that mention a configured name
-    templates: dict[str, re.Pattern[str]] = {}
-    template_members: dict[str, list[int]] = defaultdict(list)
+    prepared = _prepared_names(names)
+    by_subject: dict[str, list[int]] = defaultdict(list)
     for i, subject in enumerate(subjects):
-        tmpl = subject_template(subject, names)
+        by_subject[subject or ''].append(i)
+
+    unique_subjects = list(by_subject.keys())
+
+    # Seed: name-bearing titles get a template key immediately.
+    templates: dict[str, re.Pattern[str]] = {}
+    subject_key: dict[str, str] = {}
+    for subject in unique_subjects:
+        tmpl = _subject_template_prepared(subject, prepared)
         if tmpl is None:
             continue
         key = group_key_from_template(tmpl)
-        if key not in templates:
-            templates[key] = template_to_regex(tmpl)
-        template_members[key].append(i)
+        templates.setdefault(key, template_to_regex(tmpl))
+        subject_key[subject] = key
 
-    # Every subject matching a template joins that template's cluster
-    for key, rx in templates.items():
-        matched = [i for i, subject in enumerate(subjects) if rx.match(subject or '')]
-        if not matched:
-            matched = template_members[key]
-        root = matched[0]
-        for i in matched[1:]:
-            uf.union(root, i)
-
-    # Exact normalised subject (known names stripped) for remaining merges
-    by_norm: dict[str, list[int]] = defaultdict(list)
-    for i, subject in enumerate(subjects):
-        by_norm[normalize_subject(subject, names)].append(i)
-    for indices in by_norm.values():
-        root = indices[0]
-        for i in indices[1:]:
-            uf.union(root, i)
-
-    # Stable id per component: prefer a template key if any member seeded one,
-    # else normalised hash of the representative subject.
-    component_ids: dict[int, str] = {}
-    for i, subject in enumerate(subjects):
-        root = uf.find(i)
-        if root in component_ids:
-            continue
-        tmpl = subject_template(subject, names)
-        if tmpl is not None:
-            component_ids[root] = group_key_from_template(tmpl)
-            continue
-        # If another member of this component seeded a template, reuse it
-        seeded = None
-        for j, other in enumerate(subjects):
-            if uf.find(j) != root:
-                continue
-            other_tmpl = subject_template(other, names)
-            if other_tmpl is not None:
-                seeded = group_key_from_template(other_tmpl)
+    # Only try regex templates against titles that didn't already seed a key
+    # (covers unknown names like "Priya" in an otherwise identical title).
+    unkeyed = [s for s in unique_subjects if s not in subject_key]
+    if unkeyed and templates:
+        for key, rx in templates.items():
+            still = []
+            for subject in unkeyed:
+                if rx.match(subject):
+                    subject_key[subject] = key
+                else:
+                    still.append(subject)
+            unkeyed = still
+            if not unkeyed:
                 break
-        if seeded:
-            component_ids[root] = seeded
-        else:
-            component_ids[root] = group_key_from_norm(normalize_subject(subject, names))
 
-    # Second pass: members that only matched via regex may share a root with a
-    # template seed — already handled. Ensure all roots have ids.
-    return [component_ids[uf.find(i)] for i in range(n)]
+    for subject in unkeyed:
+        subject_key[subject] = group_key_from_norm(
+            _normalize_subject_prepared(subject, prepared),
+        )
+
+    return [subject_key[subject or ''] for subject in subjects]
 
 
 def build_groups(
@@ -257,7 +232,8 @@ def build_groups(
     archived view if any member is archived, and in the inbox view if any
     member is not — so mixed groups show in both.
     """
-    group_ids = assign_group_ids([m.subject for m in messages], names)
+    prepared = _prepared_names(names)
+    group_ids = assign_group_ids([m.subject for m in messages], prepared)
     by_key: dict[str, list[MessageInfo]] = defaultdict(list)
     for msg, gk in zip(messages, group_ids):
         by_key[gk].append(msg)
@@ -284,8 +260,12 @@ def build_groups(
             if q not in hay:
                 continue
 
-        tmpl = subject_template(primary.subject, names)
-        normalized = canonicalize_template(tmpl) if tmpl else normalize_subject(primary.subject, names)
+        tmpl = _subject_template_prepared(primary.subject, prepared)
+        normalized = (
+            canonicalize_template(tmpl)
+            if tmpl
+            else _normalize_subject_prepared(primary.subject, prepared)
+        )
 
         groups.append(
             EmailGroup(

@@ -82,9 +82,12 @@ export const api = {
     })
     if (opts.q) params.set('q', opts.q)
     if (opts.refresh) params.set('refresh', 'true')
-    return request<{ emails: EmailGroup[], errors: string[], total_messages: number }>(
-      `/api/emails?${params}`,
-    )
+    return request<{
+      emails: EmailGroup[],
+      errors: string[],
+      total_messages: number,
+      fetching?: boolean,
+    }>(`/api/emails?${params}`)
   },
   sender: (email: string, refresh = false) => {
     const params = refresh ? '?refresh=true' : ''
