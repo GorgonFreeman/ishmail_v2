@@ -109,6 +109,8 @@ export const api = {
     messages: MessageRef[],
     account_keys?: string[] | null,
   }) => request<Job>('/api/jobs/action', { method: 'POST', body: JSON.stringify(body) }),
+  activeFetchJob: () =>
+    request<{ job: Job | null }>('/api/jobs/fetch/active'),
   startFetch: (force = true) =>
     request<Job>(`/api/jobs/fetch?force=${force ? 'true' : 'false'}`, { method: 'POST' }),
   unsubscribe: (sender: string, account_keys?: string[] | null) =>

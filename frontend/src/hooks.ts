@@ -101,29 +101,52 @@ export function useTrackJob() {
 export function useFetchMail(watch: (job: Job) => void, activeJobs: Job[]) {
   const [fetchJobId, setFetchJobId] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
-  const started = useRef(false)
+  const bootstrapped = useRef(false)
 
-  const startFetch = useCallback(async (force: boolean) => {
-    const job = await api.startFetch(force)
+  const attachFetchJob = useCallback((job: Job) => {
     setFetchJobId(job.id)
     watch(job)
-    return job
   }, [watch])
 
+  const startFetch = useCallback(async (force: boolean) => {
+    const { job: active } = await api.activeFetchJob()
+    if (active && (active.status === 'pending' || active.status === 'running')) {
+      attachFetchJob(active)
+      return active
+    }
+    const job = await api.startFetch(force)
+    attachFetchJob(job)
+    return job
+  }, [attachFetchJob])
+
   useEffect(() => {
-    if (started.current) return
-    started.current = true
+    if (bootstrapped.current) return
+    bootstrapped.current = true
     startFetch(false).catch(() => setReady(true))
   }, [startFetch])
 
-  const fetchJob = activeJobs.find(j => j.id === fetchJobId) ?? null
+  const fetchJob =
+    activeJobs.find(j => j.id === fetchJobId)
+    ?? activeJobs.find(
+      j => j.kind === 'fetch' && (j.status === 'pending' || j.status === 'running'),
+    )
+    ?? null
 
   useEffect(() => {
-    if (!fetchJob) return
-    if (fetchJob.status === 'completed' || fetchJob.status === 'failed') {
+    if (fetchJob && fetchJob.id !== fetchJobId) {
+      setFetchJobId(fetchJob.id)
+    }
+  }, [fetchJob, fetchJobId])
+
+  useEffect(() => {
+    const done = activeJobs.some(
+      j => j.kind === 'fetch' && (j.status === 'completed' || j.status === 'failed'),
+    )
+    if (done) setReady(true)
+    if (fetchJob?.status === 'completed' || fetchJob?.status === 'failed') {
       setReady(true)
     }
-  }, [fetchJob])
+  }, [fetchJob, activeJobs])
 
   const fetching =
     Boolean(fetchJob) &&

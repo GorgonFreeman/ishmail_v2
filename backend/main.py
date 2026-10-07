@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -17,6 +18,20 @@ from jobs import queue
 from mail_service import mail_service
 
 app = FastAPI(title='ishmail_v2', version='0.1.0')
+
+_fetch_job_lock = threading.Lock()
+_active_fetch_job_id: str | None = None
+
+
+def _current_fetch_job():
+    if not _active_fetch_job_id:
+        return None
+    job = queue.get(_active_fetch_job_id)
+    if not job or job.kind != 'fetch':
+        return None
+    if job.status in ('pending', 'running'):
+        return job
+    return None
 
 app.add_middleware(
     CORSMiddleware,
@@ -154,23 +169,49 @@ def sender_emails(sender_email: str, refresh: bool = Query(False)):
     }
 
 
+@app.get('/api/jobs/fetch/active')
+def active_fetch_job():
+    """Return the in-flight fetch job, if any (for UI coalescing)."""
+    job = _current_fetch_job()
+    if not job:
+        return {'job': None}
+    return {'job': job.to_dict()}
+
+
 @app.post('/api/jobs/fetch')
 def start_fetch(force: bool = Query(True)):
-    """Background multi-account fetch with per-inbox progress."""
-    total = len(mail_service.accounts())
+    """Background multi-account fetch with per-inbox progress (single-flight)."""
+    global _active_fetch_job_id
 
-    def run(job):
-        def progress_cb(p):
-            job.progress = p
+    with _fetch_job_lock:
+        existing = _current_fetch_job()
+        if existing:
+            return existing.to_dict()
 
-        messages, errors = mail_service.fetch_all(force=force, progress_cb=progress_cb)
-        return {
-            'total_messages': len(messages),
-            'errors': errors,
-        }
+        total = len(mail_service.accounts())
 
-    job = queue.submit('fetch', run, progress={'done': 0, 'total': total})
-    return job.to_dict()
+        def run(job):
+            global _active_fetch_job_id
+            try:
+                def progress_cb(p):
+                    job.progress = p
+
+                messages, errors = mail_service.fetch_all(
+                    force=force,
+                    progress_cb=progress_cb,
+                )
+                return {
+                    'total_messages': len(messages),
+                    'errors': errors,
+                }
+            finally:
+                with _fetch_job_lock:
+                    if _active_fetch_job_id == job.id:
+                        _active_fetch_job_id = None
+
+        job = queue.submit('fetch', run, progress={'done': 0, 'total': total})
+        _active_fetch_job_id = job.id
+        return job.to_dict()
 
 
 @app.post('/api/jobs/action')
