@@ -46,6 +46,29 @@
   margin-bottom: 0.85rem;
 }
 
+.detailBody {
+  margin-top: 0.25rem;
+}
+
+.detailLetter {
+  width: 100%;
+  min-height: 280px;
+  border: 1px solid #ebe3d5;
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.detailLetter iframe {
+  display: block;
+  width: 100%;
+  min-height: 420px;
+  height: 60vh;
+  max-height: 900px;
+  border: 0;
+  background: #fff;
+}
+
 .detailBodyText {
   margin: 0;
   white-space: pre-wrap;

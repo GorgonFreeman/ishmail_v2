@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { Letter } from 'react-letter'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import type { Account, EmailGroup, Job, Message, MessageRef } from './api'
 import { AccountPickerModal } from './Modal'
@@ -108,6 +109,7 @@ export function EmailDetailPage({ accounts, watch, mailReady }: Props) {
   }
 
   const senderLabel = primary.from_name || primary.from_email
+  const bodyHtml = detailQuery.data?.body_html || ''
   const bodyText = detailQuery.data?.body_text || ''
 
   return (
@@ -190,8 +192,17 @@ export function EmailDetailPage({ accounts, watch, mailReady }: Props) {
           {detailQuery.error && (
             <div className="errorBanner">{(detailQuery.error as Error).message}</div>
           )}
-          {!detailQuery.isLoading && !detailQuery.error && (
-            <pre className="detailBodyText">{bodyText || '(no text body)'}</pre>
+          {!detailQuery.isLoading && !detailQuery.error && (bodyHtml || bodyText) && (
+            <Letter
+              className="detailLetter"
+              html={bodyHtml}
+              text={bodyText}
+              useIframe
+              iframeTitle={group.subject}
+            />
+          )}
+          {!detailQuery.isLoading && !detailQuery.error && !bodyHtml && !bodyText && (
+            <p className="subtle">(no message body)</p>
           )}
         </div>
       </article>
