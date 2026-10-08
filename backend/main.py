@@ -13,11 +13,21 @@ from pydantic import BaseModel, Field
 # Allow `uvicorn main:app` from backend/
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from api_v1 import router as v1_router
 from grouping import build_groups
 from jobs import queue
 from mail_service import mail_service
 
-app = FastAPI(title='ishmail_v2', version='0.1.0')
+app = FastAPI(
+    title='ishmail_v2',
+    version='0.1.0',
+    description=(
+        'Multi-inbox email organiser. UI uses /api/* (async jobs). '
+        'Scripts and agents can use sync /v1/* while the app is running — '
+        'see /docs.'
+    ),
+)
+app.include_router(v1_router)
 
 _fetch_job_lock = threading.Lock()
 _active_fetch_job_id: str | None = None

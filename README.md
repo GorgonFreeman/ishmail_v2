@@ -42,6 +42,24 @@ From the repo root (starts API + UI):
 
 Open http://localhost:5173 — the Vite proxy forwards `/api` to the backend.
 
+API (while `./run` is up): http://127.0.0.1:8000 — interactive docs at
+[/docs](http://127.0.0.1:8000/docs). Prefer **`/v1/*`** for scripts (sync
+results); the UI uses async `/api/jobs/*`.
+
+```bash
+# search grouped mail (from the live cache)
+curl -s 'http://127.0.0.1:8000/v1/search?q=invoice' | jq '.emails[:3]'
+
+# star / archive / delete a group (waits for IMAP)
+curl -s -X POST "http://127.0.0.1:8000/v1/groups/$GROUP_ID/star"
+curl -s -X POST "http://127.0.0.1:8000/v1/groups/$GROUP_ID/delete"
+
+# bulk action
+curl -s -X POST http://127.0.0.1:8000/v1/action \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"archive","group_ids":["…"]}'
+```
+
 ## Creds
 
 `.creds.yml` is gitignored. Top-level `names:` seeds subject dedupe: when a
