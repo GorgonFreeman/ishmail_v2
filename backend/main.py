@@ -101,8 +101,9 @@ def _emails_payload(
     q: str | None,
     fetching: bool,
     generation: int,
+    history: str,
 ):
-    cache_key = (generation, len(messages), archived, q or '')
+    cache_key = (generation, len(messages), archived, q or '', history)
     cached = _groups_cache.get(cache_key)
     if cached is not None:
         groups = cached
@@ -135,6 +136,7 @@ def _emails_payload(
         'errors': errors,
         'total_messages': len(messages),
         'fetching': fetching,
+        'history': history,
     }
 
 
@@ -144,14 +146,14 @@ def list_emails(
     q: str | None = Query(None),
     refresh: bool = Query(False),
 ):
-    # Prefer the live snapshot so the UI can stream groups while a background
+    # Prefer the live snapshot so the UI can show groups while a background
     # fetch is still walking accounts. Never block this request on IMAP.
     if refresh:
         # Kick a background job if one isn't already running; response still
         # comes from whatever is already in the cache.
-        start_fetch(force=True)
+        start_fetch(force=True, full_history=False)
 
-    messages, errors, fetching, has_cache, generation = mail_service.snapshot()
+    messages, errors, fetching, has_cache, generation, history = mail_service.snapshot()
     if has_cache or fetching:
         return _emails_payload(
             messages,
@@ -160,10 +162,13 @@ def list_emails(
             q=q,
             fetching=fetching,
             generation=generation,
+            history=history,
         )
 
     # Cold start with no job yet — return empty rather than blocking.
-    return _emails_payload([], [], archived=archived, q=q, fetching=False, generation=0)
+    return _emails_payload(
+        [], [], archived=archived, q=q, fetching=False, generation=0, history='recent',
+    )
 
 
 @app.get('/api/message')
@@ -185,8 +190,8 @@ def message_detail(
 def sender_emails(sender_email: str, refresh: bool = Query(False)):
     sender = sender_email.lower().strip()
     if refresh:
-        start_fetch(force=True)
-    messages, errors, _fetching, has_cache, _generation = mail_service.snapshot()
+        start_fetch(force=True, full_history=False)
+    messages, errors, _fetching, has_cache, _generation, _history = mail_service.snapshot()
     if not has_cache and not _fetching:
         messages, errors = mail_service.fetch_all(force=False)
     matched = [m for m in messages if m.from_email.lower() == sender]
@@ -224,16 +229,30 @@ def active_fetch_job():
 
 
 @app.post('/api/jobs/fetch')
-def start_fetch(force: bool = Query(True)):
-    """Background multi-account fetch with per-inbox progress (single-flight)."""
+def start_fetch(
+    force: bool = Query(True),
+    full_history: bool = Query(False),
+):
+    """Background multi-account fetch with per-inbox progress (single-flight).
+
+    Default loads ~6 months (SINCE). Pass full_history=true for the whole mailbox.
+    """
     global _active_fetch_job_id
 
     with _fetch_job_lock:
         existing = _current_fetch_job()
         if existing:
-            return existing.to_dict()
+            existing_full = bool(
+                existing.progress.get('full_history')
+                or existing.progress.get('history') == 'full'
+            )
+            # Coalesce same-or-broader in-flight fetches; supersede recent→full.
+            if existing_full or not full_history:
+                return existing.to_dict()
+            _active_fetch_job_id = None
 
         total = len(mail_service.accounts())
+        history = 'full' if full_history else 'recent'
 
         def run(job):
             global _active_fetch_job_id
@@ -242,19 +261,30 @@ def start_fetch(force: bool = Query(True)):
                     job.progress = p
 
                 messages, errors = mail_service.fetch_all(
-                    force=force,
+                    force=force or full_history,
                     progress_cb=progress_cb,
+                    full_history=full_history,
                 )
                 return {
                     'total_messages': len(messages),
                     'errors': errors,
+                    'history': history,
                 }
             finally:
                 with _fetch_job_lock:
                     if _active_fetch_job_id == job.id:
                         _active_fetch_job_id = None
 
-        job = queue.submit('fetch', run, progress={'done': 0, 'total': total})
+        job = queue.submit(
+            'fetch',
+            run,
+            progress={
+                'done': 0,
+                'total': total,
+                'full_history': full_history,
+                'history': history,
+            },
+        )
         _active_fetch_job_id = job.id
         return job.to_dict()
 
@@ -318,6 +348,10 @@ def get_job(job_id: str):
 
 
 @app.post('/api/refresh')
-def refresh():
-    messages, errors = mail_service.fetch_all(force=True)
-    return {'total_messages': len(messages), 'errors': errors}
+def refresh(full_history: bool = Query(False)):
+    messages, errors = mail_service.fetch_all(force=True, full_history=full_history)
+    return {
+        'total_messages': len(messages),
+        'errors': errors,
+        'history': 'full' if full_history else 'recent',
+    }

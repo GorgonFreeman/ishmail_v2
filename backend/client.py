@@ -4,7 +4,7 @@ import socket
 import ssl
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Callable, TypeVar
 
 import certifi
@@ -309,10 +309,17 @@ class AccountClient:
     def close(self):
         self._hard_close()
 
-    def list_messages(self, folder: str, criteria='ALL', archived: bool = False) -> list[MessageInfo]:
+    def list_messages(
+        self,
+        folder: str,
+        criteria='ALL',
+        archived: bool = False,
+        since: date | None = None,
+    ) -> list[MessageInfo]:
         def op():
             self.conn.select_folder(folder, readonly=True)
-            uids = self.conn.search(criteria)
+            search = ['SINCE', since] if since is not None else criteria
+            uids = self.conn.search(search)
             if not uids:
                 return []
 

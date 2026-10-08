@@ -11,8 +11,10 @@ type Props = {
   fetchJob: Job | null,
   fetching: boolean,
   mailReady: boolean,
-  onRefresh: () => Promise<unknown>,
+  onRefresh: (fullHistory?: boolean) => Promise<unknown>,
   refreshPending: boolean,
+  onLoadFullHistory: () => Promise<unknown>,
+  loadFullHistoryPending: boolean,
 }
 
 function FetchProgress({ job }: { job: Job | null }) {
@@ -24,10 +26,14 @@ function FetchProgress({ job }: { job: Job | null }) {
       : typeof job?.progress?.account_key === 'string'
         ? job.progress.account_key
         : null
+  const full = Boolean(
+    job?.progress?.full_history || job?.progress?.history === 'full',
+  )
   const pct = total > 0 ? Math.round((done / total) * 100) : 0
+  const scope = full ? 'full history' : 'last 6 months'
   const label = total > 0
-    ? `Loading mail… ${done}/${total}${current ? ` — ${current}` : ''}`
-    : 'Loading mail across inboxes…'
+    ? `Loading ${scope}… ${done}/${total}${current ? ` — ${current}` : ''}`
+    : `Loading ${scope} across inboxes…`
 
   return (
     <div className="fetchProgress">
@@ -47,6 +53,8 @@ export function InboxPage({
   mailReady,
   onRefresh,
   refreshPending,
+  onLoadFullHistory,
+  loadFullHistoryPending,
 }: Props) {
   const [searchParams, setSearchParams] = useSearchParams()
   const archived = searchParams.get('archived') === 'true'
@@ -109,6 +117,13 @@ export function InboxPage({
   const hasSelection = selectedIds.size > 0
   const showInitialProgress = (fetching || !mailReady) && emails.length === 0
   const showList = Boolean(data)
+  const history = data?.history === 'full' || fetchJob?.progress?.history === 'full'
+    ? 'full'
+    : 'recent'
+  const loadingFullHistory = fetching && (
+    fetchJob?.progress?.full_history === true
+    || fetchJob?.progress?.history === 'full'
+  )
 
   return (
     <div className="page">
@@ -118,7 +133,8 @@ export function InboxPage({
           <p className="subtle">
             {data ? `${emails.length} groups · ${data.total_messages} raw` : 'Loading…'}
             {archived ? ' · archived' : ' · inbox'}
-            {(fetching || data?.fetching) ? ' · streaming…' : ''}
+            {history === 'full' ? ' · full history' : ' · last 6 months'}
+            {(fetching || data?.fetching) ? ' · loading…' : ''}
           </p>
         </div>
         <div className="headerActions">
@@ -127,13 +143,28 @@ export function InboxPage({
             className="btn ghost"
             disabled={refreshPending || isFetching}
             onClick={() => {
-              void onRefresh()
+              void onRefresh(history === 'full')
             }}
           >
             Refresh
           </button>
         </div>
       </header>
+
+      {history !== 'full' && (
+        <button
+          type="button"
+          className="historyBanner"
+          disabled={refreshPending || loadFullHistoryPending || loadingFullHistory}
+          onClick={() => {
+            void onLoadFullHistory()
+          }}
+        >
+          {loadingFullHistory || loadFullHistoryPending
+            ? 'Loading full history…'
+            : 'Showing last 6 months — load full history'}
+        </button>
+      )}
 
       <div className="stickyBar">
         <span className="selectionCount">{selectedIds.size} selected</span>

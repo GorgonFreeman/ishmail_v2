@@ -87,6 +87,7 @@ export const api = {
       errors: string[],
       total_messages: number,
       fetching?: boolean,
+      history?: 'recent' | 'full',
     }>(`/api/emails?${params}`)
   },
   sender: (email: string, refresh = false) => {
@@ -114,8 +115,13 @@ export const api = {
   }) => request<Job>('/api/jobs/action', { method: 'POST', body: JSON.stringify(body) }),
   activeFetchJob: () =>
     request<{ job: Job | null }>('/api/jobs/fetch/active'),
-  startFetch: (force = true) =>
-    request<Job>(`/api/jobs/fetch?force=${force ? 'true' : 'false'}`, { method: 'POST' }),
+  startFetch: (force = true, fullHistory = false) => {
+    const params = new URLSearchParams({
+      force: force ? 'true' : 'false',
+      full_history: fullHistory ? 'true' : 'false',
+    })
+    return request<Job>(`/api/jobs/fetch?${params}`, { method: 'POST' })
+  },
   unsubscribe: (sender: string, account_keys?: string[] | null) =>
     request<Job>('/api/jobs/unsubscribe', {
       method: 'POST',

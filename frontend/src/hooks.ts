@@ -114,13 +114,19 @@ export function useFetchMail(watch: (job: Job) => void, activeJobs: Job[]) {
     watch(job)
   }, [watch])
 
-  const startFetch = useCallback(async (force: boolean) => {
+  const startFetch = useCallback(async (force: boolean, fullHistory = false) => {
     const { job: active } = await api.activeFetchJob()
     if (active && (active.status === 'pending' || active.status === 'running')) {
-      attachFetchJob(active)
-      return active
+      const activeFull = Boolean(
+        active.progress?.full_history || active.progress?.history === 'full',
+      )
+      // Join in-flight job unless we need full history and it is only recent.
+      if (activeFull || !fullHistory) {
+        attachFetchJob(active)
+        return active
+      }
     }
-    const job = await api.startFetch(force)
+    const job = await api.startFetch(force, fullHistory)
     attachFetchJob(job)
     return job
   }, [attachFetchJob])
@@ -129,7 +135,7 @@ export function useFetchMail(watch: (job: Job) => void, activeJobs: Job[]) {
     if (bootstrapped.current) return
     bootstrapped.current = true
     setReady(true)
-    startFetch(false).catch(() => setReady(true))
+    startFetch(false, false).catch(() => setReady(true))
   }, [startFetch])
 
   const fetchJob =
@@ -156,10 +162,15 @@ export function useFetchMail(watch: (job: Job) => void, activeJobs: Job[]) {
     (fetchJob!.status === 'pending' || fetchJob!.status === 'running')
 
   const refresh = useMutation({
-    mutationFn: () => startFetch(true),
+    mutationFn: (vars: { fullHistory?: boolean }) =>
+      startFetch(true, Boolean(vars?.fullHistory)),
   })
 
-  return { fetchJob, fetching, ready, refresh }
+  const loadFullHistory = useMutation({
+    mutationFn: () => startFetch(true, true),
+  })
+
+  return { fetchJob, fetching, ready, refresh, loadFullHistory }
 }
 
 export function useMailActions(watch: (job: Job) => void) {

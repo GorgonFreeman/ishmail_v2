@@ -263,6 +263,32 @@ body {
   border-radius: 8px;
 }
 
+.historyBanner {
+  display: block;
+  width: calc(100% - 2rem);
+  margin: 0.35rem 1rem 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid #c9d9cf;
+  border-radius: 8px;
+  background: #eef5f0;
+  color: #1f4d3a;
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 550;
+  text-align: center;
+  cursor: pointer;
+}
+
+.historyBanner:hover:not(:disabled) {
+  background: #e2eee6;
+  border-color: #a8c4b3;
+}
+
+.historyBanner:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
 .fetchProgressBanner .fetchProgress {
   margin: 0;
   width: 100%;
