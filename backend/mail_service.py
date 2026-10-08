@@ -5,10 +5,14 @@ from __future__ import annotations
 import threading
 import time
 from collections import defaultdict
+from typing import Callable, TypeVar
 
-from client import AccountClient, MessageInfo
+from client import AccountClient, MessageInfo, is_retriable_imap_error
 from config import Account, CredsConfig, load_creds
 from unsubscribe import attempt_unsubscribe
+
+T = TypeVar('T')
+ACCOUNT_ATTEMPTS = 3
 
 
 def _friendly_error(account: Account, exc: BaseException) -> str:
@@ -61,9 +65,27 @@ class MailService:
             except Exception:
                 pass
 
-    def _get_client_unlocked(self, account_key: str) -> AccountClient:
+    def _fresh_account(self, account_key: str) -> Account:
+        """Reload .creds.yml so password/token config changes are picked up."""
+        try:
+            self.reload_creds()
+        except Exception:
+            pass
+        acc = self.account_map().get(account_key)
+        if not acc:
+            raise KeyError(f'Unknown account {account_key}')
+        return acc
+
+    def _get_client_unlocked(self, account_key: str, force_new: bool = False) -> AccountClient:
+        if force_new:
+            self._drop_client_unlocked(account_key)
+
         client = self._clients.get(account_key)
         if client is not None:
+            # Keep Account object current (password/app_password edits).
+            acc = self.account_map().get(account_key)
+            if acc:
+                client.account = acc
             try:
                 client.ensure_alive()
                 return client
@@ -78,17 +100,41 @@ class MailService:
         self._clients[account_key] = client
         return client
 
+    def _with_account_retry(self, account_key: str, op: Callable[[AccountClient], T]) -> T:
+        """Run an IMAP op; on flaky auth/socket errors, re-auth and retry."""
+        last: BaseException | None = None
+        for attempt in range(ACCOUNT_ATTEMPTS):
+            try:
+                with self._imap_lock:
+                    if attempt > 0:
+                        self._fresh_account(account_key)
+                        client = self._get_client_unlocked(account_key, force_new=True)
+                    else:
+                        client = self._get_client_unlocked(account_key)
+                    return op(client)
+            except Exception as e:
+                last = e
+                with self._imap_lock:
+                    self._drop_client_unlocked(account_key)
+                if not is_retriable_imap_error(e) or attempt + 1 >= ACCOUNT_ATTEMPTS:
+                    raise
+                time.sleep(1.2 * (attempt + 1))
+        if last:
+            raise last
+        raise RuntimeError('unreachable')
+
     def get_client(self, account_key: str) -> AccountClient:
         with self._imap_lock:
             return self._get_client_unlocked(account_key)
 
     def get_message_detail(self, account_key: str, folder: str, uid: int) -> dict:
-        with self._imap_lock:
-            client = self._get_client_unlocked(account_key)
+        def _detail(client: AccountClient):
             detail = client.get_message_detail(folder, uid)
             # Don't leave connections idle after a one-off read
             self._drop_client_unlocked(account_key)
             return detail
+
+        return self._with_account_retry(account_key, _detail)
 
     def invalidate_cache(self):
         with self._cache_lock:
@@ -166,8 +212,11 @@ class MailService:
                         'generation': generation,
                     })
                 try:
-                    with self._imap_lock:
-                        client = self._get_client_unlocked(acc.key)
+                    # Snapshot length so a mid-account retry can't duplicate msgs.
+                    base_len = len(messages)
+
+                    def _fetch_one(client: AccountClient):
+                        del messages[base_len:]
                         inbox = client.list_messages(client.inbox_folder, archived=False)
                         messages.extend(inbox)
                         # Publish inbox immediately so the UI can stream groups
@@ -192,6 +241,8 @@ class MailService:
                         # Close after each account so we don't hold ~15 idle IMAP
                         # sessions (providers drop them → NONAUTH on reuse).
                         self._drop_client_unlocked(acc.key)
+
+                    self._with_account_retry(acc.key, _fetch_one)
                     if progress_cb:
                         progress_cb({
                             'done': i + 1,
@@ -269,18 +320,19 @@ class MailService:
         for (account_key, folder), bucket in by_bucket.items():
             uids = [m.uid for m in bucket]
             try:
-                with self._imap_lock:
-                    client = self._get_client_unlocked(account_key)
+                def _act(client: AccountClient, _folder=folder, _uids=uids):
                     if action == 'delete':
-                        client.trash_messages(folder, uids)
+                        client.trash_messages(_folder, _uids)
                     elif action == 'archive':
-                        client.archive_messages(folder, uids)
+                        client.archive_messages(_folder, _uids)
                     elif action == 'star':
-                        client.set_flagged(folder, uids, True)
+                        client.set_flagged(_folder, _uids, True)
                     elif action == 'unstar':
-                        client.set_flagged(folder, uids, False)
+                        client.set_flagged(_folder, _uids, False)
                     else:
                         raise ValueError(f'Unknown action {action}')
+
+                self._with_account_retry(account_key, _act)
                 results.append({
                     'account_key': account_key,
                     'folder': folder,
@@ -333,8 +385,8 @@ class MailService:
             header = None
             post = None
             try:
-                with self._imap_lock:
-                    client = self._get_client_unlocked(account_key)
+                def _headers(client: AccountClient):
+                    nonlocal header, post
                     for sample in samples:
                         headers = client.get_headers(
                             sample.folder,
@@ -345,6 +397,8 @@ class MailService:
                             header = headers['list-unsubscribe']
                             post = headers.get('list-unsubscribe-post')
                             break
+
+                self._with_account_retry(account_key, _headers)
                 if not header:
                     results.append({
                         'account_key': account_key,

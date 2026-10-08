@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import ssl
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, TypeVar
@@ -14,9 +15,50 @@ from config import Account
 
 T = TypeVar('T')
 IMAP_TIMEOUT_SECONDS = 60
+# Providers often flap AUTH / drop idle sockets; retry before surfacing.
+CONNECT_ATTEMPTS = 3
+CALL_ATTEMPTS = 3
 
 ARCHIVE_FALLBACK_NAMES = ['Archive', 'Archived', 'All Mail']
 TRASH_FALLBACK_NAMES = ['Trash', 'Deleted Items', 'Deleted', 'Bin']
+
+_CONNECTION_NEEDLES = (
+    'socket', 'connection', 'timed out', 'timeout', 'broken pipe',
+    'reset by peer', 'eof', 'not connected', 'server closed', 'bye',
+    'gone', 'nonauth', 'illegal in state', 'logged out', 'unavailable',
+    'temporary', 'try again', 'rate', 'throttle', 'too many',
+)
+
+# Many "invalid credentials" responses are flaky (rate-limits, stale tokens,
+# half-closed sockets). Treat as retriable unless clearly permanent.
+_AUTH_RETRY_NEEDLES = (
+    'authenticationfailed',
+    'authentication failed',
+    'invalid credentials',
+    'invalid login',
+    'invalid user',
+    'login failed',
+    'auth failed',
+    'authenticate failed',
+    'authentication error',
+    'wrong password',
+    'bad password',
+    'incorrect password',
+    '[auth]',
+    'oauthbearer',
+    'xoauth',
+    'unauthorized',
+    'not authenticated',
+)
+
+_PERMANENT_AUTH_NEEDLES = (
+    'basic authentication is disabled',
+    'no cached outlook token',
+    'needs client_id',
+    'device flow failed',
+    'token acquisition failed',
+    'unknown account',
+)
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -52,6 +94,19 @@ class ConnectError(Exception):
     pass
 
 
+def _exc_text(exc: BaseException) -> str:
+    parts = [str(exc)]
+    cause = getattr(exc, '__cause__', None) or getattr(exc, '__context__', None)
+    if cause is not None and cause is not exc:
+        parts.append(_exc_text(cause))
+    return ' '.join(parts).lower()
+
+
+def _is_permanent_auth_error(exc: BaseException) -> bool:
+    msg = _exc_text(exc)
+    return any(n in msg for n in _PERMANENT_AUTH_NEEDLES)
+
+
 def _is_connection_error(exc: BaseException) -> bool:
     if isinstance(
         exc,
@@ -68,18 +123,33 @@ def _is_connection_error(exc: BaseException) -> bool:
         ),
     ):
         return True
-    if isinstance(exc, IMAPClientError):
-        msg = str(exc).lower()
-        needles = (
-            'socket', 'connection', 'timed out', 'timeout', 'broken pipe',
-            'reset by peer', 'eof', 'not connected', 'server closed', 'bye',
-            'gone', 'nonauth', 'illegal in state', 'logged out',
-        )
-        return any(n in msg for n in needles)
+    if isinstance(exc, (IMAPClientError, ConnectError)):
+        msg = _exc_text(exc)
+        if any(n in msg for n in _CONNECTION_NEEDLES):
+            return True
     cause = getattr(exc, '__cause__', None) or getattr(exc, '__context__', None)
     if cause is not None and cause is not exc:
         return _is_connection_error(cause)
     return False
+
+
+def _is_retriable_auth_error(exc: BaseException) -> bool:
+    if _is_permanent_auth_error(exc):
+        return False
+    msg = _exc_text(exc)
+    return any(n in msg for n in _AUTH_RETRY_NEEDLES)
+
+
+def is_retriable_imap_error(exc: BaseException) -> bool:
+    """True for flaky socket/auth failures worth a fresh login."""
+    if _is_permanent_auth_error(exc):
+        return False
+    return _is_connection_error(exc) or _is_retriable_auth_error(exc)
+
+
+def _backoff_seconds(attempt_index: int) -> float:
+    # 0.8s, 1.6s, 3.2s…
+    return 0.8 * (2 ** attempt_index)
 
 
 class AccountClient:
@@ -91,8 +161,21 @@ class AccountClient:
         self.inbox_folder = 'INBOX'
 
     def connect(self):
-        self._open()
-        self._discover_folders()
+        """Open IMAP with retries; force OAuth refresh after the first failure."""
+        last: BaseException | None = None
+        for attempt in range(CONNECT_ATTEMPTS):
+            try:
+                self._open(force_token_refresh=attempt > 0 and self.account.uses_oauth)
+                self._discover_folders()
+                return
+            except Exception as e:
+                last = e
+                self._hard_close()
+                if not is_retriable_imap_error(e) or attempt + 1 >= CONNECT_ATTEMPTS:
+                    raise
+                time.sleep(_backoff_seconds(attempt))
+        if last:
+            raise last
 
     def ensure_alive(self):
         """NOOP (or reconnect). Call before reusing a long-lived client."""
@@ -102,11 +185,11 @@ class AccountClient:
         try:
             self.conn.noop()
         except Exception:
-            self._reconnect()
+            self._reconnect(force_token_refresh=self.account.uses_oauth)
             if self.archive_folder is None and self.trash_folder is None:
                 self._discover_folders()
 
-    def _open(self):
+    def _open(self, force_token_refresh: bool = False):
         try:
             self.conn = IMAPClient(
                 self.account.imap_host,
@@ -124,6 +207,7 @@ class AccountClient:
                         client_id=self.account.client_id or '',
                         account_key=self.account.key,
                         interactive=False,
+                        force_refresh=force_token_refresh,
                     )
                 except OutlookOauthError as e:
                     raise ConnectError(str(e)) from e
@@ -143,27 +227,46 @@ class AccountClient:
                 )
             raise ConnectError(f'{self.account.label}: {msg}') from e
 
-    def _reconnect(self):
-        if self.conn:
-            try:
-                self.conn.logout()
-            except Exception:
-                pass
-            try:
-                self.conn.shutdown()
-            except Exception:
-                pass
-            self.conn = None
-        self._open()
+    def _hard_close(self):
+        if not self.conn:
+            return
+        try:
+            self.conn.logout()
+        except Exception:
+            pass
+        try:
+            self.conn.shutdown()
+        except Exception:
+            pass
+        self.conn = None
+
+    def _reconnect(self, force_token_refresh: bool = False):
+        self._hard_close()
+        self._open(force_token_refresh=force_token_refresh)
 
     def _call(self, fn: Callable[[], T]) -> T:
-        try:
-            return fn()
-        except Exception as e:
-            if not _is_connection_error(e):
-                raise
-            self._reconnect()
-            return fn()
+        last: BaseException | None = None
+        for attempt in range(CALL_ATTEMPTS):
+            try:
+                return fn()
+            except Exception as e:
+                last = e
+                if not is_retriable_imap_error(e) or attempt + 1 >= CALL_ATTEMPTS:
+                    raise
+                try:
+                    self._reconnect(
+                        force_token_refresh=(
+                            self.account.uses_oauth and _is_retriable_auth_error(e)
+                        ),
+                    )
+                except Exception as re_e:
+                    last = re_e
+                    if not is_retriable_imap_error(re_e) or attempt + 1 >= CALL_ATTEMPTS:
+                        raise
+                time.sleep(_backoff_seconds(attempt))
+        if last:
+            raise last
+        raise RuntimeError('unreachable')
 
     def _discover_folders(self):
         try:
@@ -204,16 +307,7 @@ class AccountClient:
                 pass
 
     def close(self):
-        if self.conn:
-            try:
-                self.conn.logout()
-            except Exception:
-                pass
-            try:
-                self.conn.shutdown()
-            except Exception:
-                pass
-            self.conn = None
+        self._hard_close()
 
     def list_messages(self, folder: str, criteria='ALL', archived: bool = False) -> list[MessageInfo]:
         def op():

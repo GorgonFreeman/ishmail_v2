@@ -54,6 +54,7 @@ def acquire_access_token(
     client_id: str,
     account_key: str,
     interactive: bool = False,
+    force_refresh: bool = False,
 ) -> str:
     if not client_id:
         raise OutlookOauthError(
@@ -71,7 +72,11 @@ def acquire_access_token(
             (a for a in accounts if (a.get('username') or '').lower() == email.lower()),
             accounts[0],
         )
-        result = app.acquire_token_silent(OUTLOOK_SCOPES, account=account)
+        result = app.acquire_token_silent(
+            OUTLOOK_SCOPES,
+            account=account,
+            force_refresh=force_refresh,
+        )
 
     if result and 'access_token' in result:
         _save_cache(cache, path)
