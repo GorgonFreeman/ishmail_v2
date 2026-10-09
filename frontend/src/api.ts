@@ -76,9 +76,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   accounts: () => request<{ accounts: Account[], names: string[] }>('/api/accounts'),
-  emails: (opts: { archived: boolean, q?: string, refresh?: boolean }) => {
+  emails: (opts: {
+    archived: boolean,
+    q?: string,
+    refresh?: boolean,
+    history?: 'recent' | 'full',
+  }) => {
     const params = new URLSearchParams({
       archived: String(opts.archived),
+      history: opts.history || 'recent',
     })
     if (opts.q) params.set('q', opts.q)
     if (opts.refresh) params.set('refresh', 'true')
@@ -88,6 +94,8 @@ export const api = {
       total_messages: number,
       fetching?: boolean,
       history?: 'recent' | 'full',
+      full_ready?: boolean,
+      full_fetching?: boolean,
     }>(`/api/emails?${params}`)
   },
   sender: (email: string, refresh = false) => {
@@ -113,8 +121,10 @@ export const api = {
     messages: MessageRef[],
     account_keys?: string[] | null,
   }) => request<Job>('/api/jobs/action', { method: 'POST', body: JSON.stringify(body) }),
-  activeFetchJob: () =>
-    request<{ job: Job | null }>('/api/jobs/fetch/active'),
+  activeFetchJob: (history: 'recent' | 'full' = 'recent') =>
+    request<{ job: Job | null }>(
+      `/api/jobs/fetch/active?history=${history}`,
+    ),
   startFetch: (force = true, fullHistory = false) => {
     const params = new URLSearchParams({
       force: force ? 'true' : 'false',

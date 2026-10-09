@@ -18,10 +18,14 @@ const queryClient = new QueryClient({
 function Shell() {
   const { data, isLoading, error } = useAccounts()
   const { activeJobs, watch } = useTrackJob()
-  const { fetchJob, fetching, ready, refresh, loadFullHistory } = useFetchMail(
-    watch,
-    activeJobs,
-  )
+  const {
+    fetchJob,
+    fetching,
+    fullFetching,
+    ready,
+    refresh,
+    loadFullHistory,
+  } = useFetchMail(watch, activeJobs)
   const accounts = data?.accounts || []
 
   return (
@@ -60,6 +64,7 @@ function Shell() {
                 watch={watch}
                 fetchJob={fetchJob}
                 fetching={fetching}
+                fullFetching={fullFetching}
                 mailReady={ready}
                 onRefresh={(fullHistory = false) =>
                   refresh.mutateAsync({ fullHistory })

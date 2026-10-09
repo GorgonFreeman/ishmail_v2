@@ -2,11 +2,28 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, type Job, type MessageRef } from './api'
 
-export function useEmails(archived: boolean, q: string, enabled = true) {
+export type HistoryMode = 'recent' | 'full'
+
+export function useEmails(
+  archived: boolean,
+  q: string,
+  history: HistoryMode = 'recent',
+  enabled = true,
+) {
   return useQuery({
-    queryKey: ['emails', archived, q],
-    queryFn: () => api.emails({ archived, q: q || undefined }),
-    refetchInterval: (query) => (query.state.data?.fetching ? 1_200 : 60_000),
+    queryKey: ['emails', archived, q, history],
+    queryFn: () => api.emails({
+      archived,
+      q: q || undefined,
+      history,
+    }),
+    // Poll the active view while its pool is fetching; also poll while full
+    // history loads in the background so full_ready/full_fetching update.
+    refetchInterval: (query) => {
+      const d = query.state.data
+      if (d?.fetching || d?.full_fetching) return 1_200
+      return 60_000
+    },
     enabled,
   })
 }
@@ -71,7 +88,7 @@ export function useTrackJob() {
       try {
         const latest = await api.job(job.id)
         setActiveJobs(prev => prev.map(j => (j.id === latest.id ? latest : j)))
-        // Streamed fetch: as each account lands, refresh the grouped list.
+        // Refresh email queries as fetch progress lands (per-pool caches).
         if (latest.kind === 'fetch' && latest.progress?.done !== lastDone) {
           lastDone = latest.progress?.done
           queryClient.invalidateQueries({ queryKey: ['emails'] })
@@ -103,7 +120,7 @@ export function useTrackJob() {
   return { activeJobs, watch }
 }
 
-/** Start a background fetch on mount; Refresh forces a full re-fetch. */
+/** Start a background fetch on mount; Refresh forces a re-fetch of the view pool. */
 export function useFetchMail(watch: (job: Job) => void, activeJobs: Job[]) {
   const [fetchJobId, setFetchJobId] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
@@ -115,16 +132,11 @@ export function useFetchMail(watch: (job: Job) => void, activeJobs: Job[]) {
   }, [watch])
 
   const startFetch = useCallback(async (force: boolean, fullHistory = false) => {
-    const { job: active } = await api.activeFetchJob()
+    const history: HistoryMode = fullHistory ? 'full' : 'recent'
+    const { job: active } = await api.activeFetchJob(history)
     if (active && (active.status === 'pending' || active.status === 'running')) {
-      const activeFull = Boolean(
-        active.progress?.full_history || active.progress?.history === 'full',
-      )
-      // Join in-flight job unless we need full history and it is only recent.
-      if (activeFull || !fullHistory) {
-        attachFetchJob(active)
-        return active
-      }
+      attachFetchJob(active)
+      return active
     }
     const job = await api.startFetch(force, fullHistory)
     attachFetchJob(job)
@@ -161,6 +173,16 @@ export function useFetchMail(watch: (job: Job) => void, activeJobs: Job[]) {
     Boolean(fetchJob) &&
     (fetchJob!.status === 'pending' || fetchJob!.status === 'running')
 
+  const recentFetching = fetching && fetchJob?.progress?.history !== 'full'
+  const fullFetching = Boolean(
+    activeJobs.some(
+      j =>
+        j.kind === 'fetch'
+        && (j.status === 'pending' || j.status === 'running')
+        && (j.progress?.full_history === true || j.progress?.history === 'full'),
+    ),
+  )
+
   const refresh = useMutation({
     mutationFn: (vars: { fullHistory?: boolean }) =>
       startFetch(true, Boolean(vars?.fullHistory)),
@@ -170,7 +192,15 @@ export function useFetchMail(watch: (job: Job) => void, activeJobs: Job[]) {
     mutationFn: () => startFetch(true, true),
   })
 
-  return { fetchJob, fetching, ready, refresh, loadFullHistory }
+  return {
+    fetchJob,
+    fetching,
+    recentFetching,
+    fullFetching,
+    ready,
+    refresh,
+    loadFullHistory,
+  }
 }
 
 export function useMailActions(watch: (job: Job) => void) {

@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from grouping import EmailGroup, build_groups
-from mail_service import mail_service
+from mail_service import HISTORY_FULL, HISTORY_RECENT, mail_service, normalize_history
 
 router = APIRouter(prefix='/v1', tags=['v1'])
 
@@ -26,26 +26,30 @@ class ActionBody(BaseModel):
     )
     account_keys: list[str] | None = None
     archived: bool = False
+    history: str = HISTORY_RECENT
 
 
 class GroupActionBody(BaseModel):
     account_keys: list[str] | None = None
     archived: bool = False
+    history: str = HISTORY_RECENT
 
 
 def _snapshot_groups(
     *,
     archived: bool,
     q: str | None = None,
+    history: str = HISTORY_RECENT,
 ) -> tuple[list[EmailGroup], list[str], bool, str, list]:
-    messages, errors, fetching, _has_cache, _generation, history = mail_service.snapshot()
+    hist = normalize_history(history)
+    messages, errors, fetching, _has_cache, _generation, hist = mail_service.snapshot(hist)
     groups = build_groups(
         messages,
         mail_service.creds.names,
         archived_view=archived,
         query=q,
     )
-    return groups, errors, fetching, history, messages
+    return groups, errors, fetching, hist, messages
 
 
 def _group_to_dict(g: EmailGroup) -> dict:
@@ -64,18 +68,26 @@ def _group_to_dict(g: EmailGroup) -> dict:
     }
 
 
-def _find_group(group_id: str, archived: bool) -> tuple[EmailGroup | None, list]:
-    """Find a group; if missing in the requested view, try the other view."""
-    groups, _errors, _fetching, _history, messages = _snapshot_groups(archived=archived)
-    for g in groups:
-        if g.id == group_id:
-            return g, messages
-    other = not archived
-    groups2, _e, _f, _h, messages2 = _snapshot_groups(archived=other)
-    for g in groups2:
-        if g.id == group_id:
-            return g, messages2
-    return None, messages
+def _find_group(
+    group_id: str,
+    archived: bool,
+    history: str = HISTORY_RECENT,
+) -> tuple[EmailGroup | None, list]:
+    """Find a group; try the other archived view, then the other history pool."""
+    for hist in (normalize_history(history), HISTORY_FULL, HISTORY_RECENT):
+        groups, _errors, _fetching, _history, messages = _snapshot_groups(
+            archived=archived,
+            history=hist,
+        )
+        for g in groups:
+            if g.id == group_id:
+                return g, messages
+        other = not archived
+        groups2, _e, _f, _h, messages2 = _snapshot_groups(archived=other, history=hist)
+        for g in groups2:
+            if g.id == group_id:
+                return g, messages2
+    return None, []
 
 
 def _apply_to_groups(
@@ -93,10 +105,8 @@ def _apply_to_groups(
     all_targets = []
     found = []
     missing = []
-    cache_messages = None
     for gid in group_ids:
         group, messages = _find_group(gid, archived)
-        cache_messages = messages
         if group is None:
             missing.append(gid)
             continue
@@ -133,17 +143,21 @@ def _apply_to_groups(
 
 
 @router.get('/status')
-def status():
-    messages, errors, fetching, has_cache, generation, history = mail_service.snapshot()
+def status(history: str = Query(HISTORY_RECENT)):
+    hist = normalize_history(history)
+    messages, errors, fetching, has_cache, generation, hist = mail_service.snapshot(hist)
+    flags = mail_service.pool_flags()
     return {
         'ok': True,
         'fetching': fetching,
         'has_cache': has_cache,
-        'history': history,
+        'history': hist,
         'generation': generation,
         'total_messages': len(messages),
         'errors': errors,
         'accounts': len(mail_service.accounts()),
+        'full_ready': flags['full_ready'],
+        'full_fetching': flags['full_fetching'],
     }
 
 
@@ -168,31 +182,40 @@ def accounts():
 def search(
     q: str | None = Query(None, description='Match subject / sender (substring)'),
     archived: bool = Query(False),
+    history: str = Query(HISTORY_RECENT),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
     """Search grouped emails from the live cache (non-blocking)."""
-    groups, errors, fetching, history, _messages = _snapshot_groups(
+    groups, errors, fetching, hist, _messages = _snapshot_groups(
         archived=archived,
         q=q,
+        history=history,
     )
+    flags = mail_service.pool_flags()
     slice_ = groups[offset:offset + limit]
     return {
         'q': q or '',
         'archived': archived,
-        'history': history,
+        'history': hist,
         'fetching': fetching,
         'total': len(groups),
         'offset': offset,
         'limit': limit,
         'emails': [_group_to_dict(g) for g in slice_],
         'errors': errors,
+        'full_ready': flags['full_ready'],
+        'full_fetching': flags['full_fetching'],
     }
 
 
 @router.get('/groups/{group_id}')
-def get_group(group_id: str, archived: bool = Query(False)):
-    group, _messages = _find_group(group_id, archived)
+def get_group(
+    group_id: str,
+    archived: bool = Query(False),
+    history: str = Query(HISTORY_RECENT),
+):
+    group, _messages = _find_group(group_id, archived, history=history)
     if group is None:
         raise HTTPException(404, f'Group not found: {group_id}')
     return _group_to_dict(group)
@@ -245,7 +268,11 @@ def action(body: ActionBody):
     if not body.messages:
         raise HTTPException(400, 'Provide group_ids or messages')
 
-    messages, _errors, _fetching, _has, _gen, _hist = mail_service.snapshot()
+    messages = mail_service.all_cached_messages()
+    if not messages:
+        messages, _errors, _fetching, _has, _gen, _hist = mail_service.snapshot(
+            normalize_history(body.history),
+        )
     targets = mail_service.messages_for_refs(
         messages,
         body.messages,

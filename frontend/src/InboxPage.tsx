@@ -1,8 +1,8 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import type { Account, EmailGroup, Job, MessageRef } from './api'
 import { EmailList } from './EmailList'
-import { useEmails, useMailActions } from './hooks'
+import { useEmails, useMailActions, type HistoryMode } from './hooks'
 import { AccountPickerModal } from './Modal'
 
 type Props = {
@@ -10,6 +10,7 @@ type Props = {
   watch: (job: Job) => void,
   fetchJob: Job | null,
   fetching: boolean,
+  fullFetching: boolean,
   mailReady: boolean,
   onRefresh: (fullHistory?: boolean) => Promise<unknown>,
   refreshPending: boolean,
@@ -17,7 +18,7 @@ type Props = {
   loadFullHistoryPending: boolean,
 }
 
-function FetchProgress({ job }: { job: Job | null }) {
+function FetchProgress({ job, labelScope }: { job: Job | null, labelScope?: string }) {
   const done = typeof job?.progress?.done === 'number' ? job.progress.done : 0
   const total = typeof job?.progress?.total === 'number' ? job.progress.total : 0
   const current =
@@ -30,7 +31,7 @@ function FetchProgress({ job }: { job: Job | null }) {
     job?.progress?.full_history || job?.progress?.history === 'full',
   )
   const pct = total > 0 ? Math.round((done / total) * 100) : 0
-  const scope = full ? 'full history' : 'last 6 months'
+  const scope = labelScope || (full ? 'full history' : 'last 6 months')
   const label = total > 0
     ? `Loading ${scope}… ${done}/${total}${current ? ` — ${current}` : ''}`
     : `Loading ${scope} across inboxes…`
@@ -50,6 +51,7 @@ export function InboxPage({
   watch,
   fetchJob,
   fetching,
+  fullFetching,
   mailReady,
   onRefresh,
   refreshPending,
@@ -67,7 +69,14 @@ export function InboxPage({
   const [q, setQ] = useState('')
   const [search, setSearch] = useState('')
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const { data, isLoading, error, isFetching } = useEmails(archived, search, mailReady)
+  // View mode is independent of in-flight full-history fetch.
+  const [historyView, setHistoryView] = useState<HistoryMode>('recent')
+  const { data, isLoading, error, isFetching } = useEmails(
+    archived,
+    search,
+    historyView,
+    mailReady,
+  )
   const { startAction } = useMailActions(watch)
   const [modal, setModal] = useState<null | {
     title: string,
@@ -82,6 +91,18 @@ export function InboxPage({
     () => emails.filter(e => selectedIds.has(e.id)),
     [emails, selectedIds],
   )
+
+  const loadingFullHistory = fullFetching || loadFullHistoryPending
+    || Boolean(data?.full_fetching)
+  const fullReady = Boolean(data?.full_ready)
+
+  // When background full load finishes, switch the list to that pool.
+  useEffect(() => {
+    if (historyView === 'recent' && fullReady && !loadingFullHistory) {
+      setHistoryView('full')
+      setSelectedIds(new Set())
+    }
+  }, [historyView, fullReady, loadingFullHistory])
 
   const toggle = (id: string) => {
     setSelectedIds(prev => {
@@ -115,15 +136,13 @@ export function InboxPage({
   }
 
   const hasSelection = selectedIds.size > 0
+  const viewFetching = Boolean(data?.fetching)
   const showInitialProgress = (fetching || !mailReady) && emails.length === 0
+    && historyView === 'recent'
   const showList = Boolean(data)
-  const history = data?.history === 'full' || fetchJob?.progress?.history === 'full'
-    ? 'full'
-    : 'recent'
-  const loadingFullHistory = fetching && (
-    fetchJob?.progress?.full_history === true
-    || fetchJob?.progress?.history === 'full'
-  )
+  // Progress banner for the *current* view pool only (not background full).
+  const showViewProgress = viewFetching && data && emails.length > 0
+    && fetchJob?.progress?.history !== 'full'
 
   return (
     <div className="page">
@@ -133,8 +152,9 @@ export function InboxPage({
           <p className="subtle">
             {data ? `${emails.length} groups · ${data.total_messages} raw` : 'Loading…'}
             {archived ? ' · archived' : ' · inbox'}
-            {history === 'full' ? ' · full history' : ' · last 6 months'}
-            {(fetching || data?.fetching) ? ' · loading…' : ''}
+            {historyView === 'full' ? ' · full history' : ' · last 6 months'}
+            {viewFetching ? ' · loading…' : ''}
+            {historyView === 'recent' && loadingFullHistory ? ' · full history loading…' : ''}
           </p>
         </div>
         <div className="headerActions">
@@ -143,7 +163,7 @@ export function InboxPage({
             className="btn ghost"
             disabled={refreshPending || isFetching}
             onClick={() => {
-              void onRefresh(history === 'full')
+              void onRefresh(historyView === 'full')
             }}
           >
             Refresh
@@ -151,19 +171,35 @@ export function InboxPage({
         </div>
       </header>
 
-      {history !== 'full' && (
+      {historyView !== 'full' && (
         <button
           type="button"
           className="historyBanner"
-          disabled={refreshPending || loadFullHistoryPending || loadingFullHistory}
+          disabled={refreshPending || loadingFullHistory || fullReady}
           onClick={() => {
             void onLoadFullHistory()
           }}
         >
-          {loadingFullHistory || loadFullHistoryPending
-            ? 'Loading full history…'
-            : 'Showing last 6 months — load full history'}
+          {loadingFullHistory
+            ? 'Loading full history in background…'
+            : fullReady
+              ? 'Full history ready'
+              : 'Showing last 6 months — load full history'}
         </button>
+      )}
+
+      {historyView === 'recent' && loadingFullHistory && (
+        <div className="fetchProgressBanner">
+          <FetchProgress
+            job={
+              fetchJob?.progress?.history === 'full'
+                || fetchJob?.progress?.full_history
+                ? fetchJob
+                : null
+            }
+            labelScope="full history"
+          />
+        </div>
       )}
 
       <div className="stickyBar">
@@ -224,7 +260,7 @@ export function InboxPage({
         </label>
       </div>
 
-      {fetching && data && emails.length > 0 && (
+      {showViewProgress && (
         <div className="fetchProgressBanner">
           <FetchProgress job={fetchJob} />
         </div>
@@ -249,6 +285,7 @@ export function InboxPage({
           emails={emails}
           selectedIds={selectedIds}
           archivedView={archived}
+          historyView={historyView}
           onToggle={toggle}
           onAction={onRowAction}
         />

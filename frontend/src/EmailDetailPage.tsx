@@ -33,8 +33,9 @@ export function EmailDetailPage({ accounts, watch, mailReady }: Props) {
   const { groupId = '' } = useParams()
   const [params] = useSearchParams()
   const archived = params.get('archived') === 'true'
+  const historyView = params.get('history') === 'full' ? 'full' as const : 'recent' as const
   const navigate = useNavigate()
-  const { data, isLoading, error } = useEmails(archived, '', mailReady)
+  const { data, isLoading, error } = useEmails(archived, '', historyView, mailReady)
   const { startAction } = useMailActions(watch)
   const [showAll, setShowAll] = useState(false)
   const [modal, setModal] = useState<null | {

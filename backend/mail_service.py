@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, TypeVar
 
@@ -22,6 +23,12 @@ HISTORY_FULL = 'full'
 
 def recent_since_date() -> date:
     return date.today() - timedelta(days=RECENT_DAYS)
+
+
+def normalize_history(history: str | None) -> str:
+    if history == HISTORY_FULL:
+        return HISTORY_FULL
+    return HISTORY_RECENT
 
 
 def _aware(dt: datetime) -> datetime:
@@ -51,6 +58,14 @@ def _friendly_error(account: Account, exc: BaseException) -> str:
     return msg
 
 
+@dataclass
+class CachePool:
+    messages: list[MessageInfo] | None = None
+    errors: list[str] = field(default_factory=list)
+    fetching: bool = False
+    generation: int = 0
+
+
 class MailService:
     def __init__(self):
         self._creds: CredsConfig | None = None
@@ -59,11 +74,10 @@ class MailService:
         # queue can run alongside request handlers.
         self._imap_lock = threading.RLock()
         self._cache_lock = threading.RLock()
-        self._cache: list[MessageInfo] | None = None
-        self._cache_errors: list[str] = []
-        self._cache_history: str = HISTORY_RECENT
-        self._fetching = False
-        self._fetch_generation = 0
+        self._pools: dict[str, CachePool] = {
+            HISTORY_RECENT: CachePool(),
+            HISTORY_FULL: CachePool(),
+        }
 
     def reload_creds(self) -> CredsConfig:
         self._creds = load_creds()
@@ -162,33 +176,66 @@ class MailService:
 
     def invalidate_cache(self):
         with self._cache_lock:
-            self._cache = None
+            for pool in self._pools.values():
+                pool.messages = None
+                pool.errors = []
 
-    def snapshot(self) -> tuple[list[MessageInfo], list[str], bool, bool, int, str]:
-        """Non-blocking view of whatever mail has been fetched so far.
+    def snapshot(
+        self,
+        history: str = HISTORY_RECENT,
+    ) -> tuple[list[MessageInfo], list[str], bool, bool, int, str]:
+        """Non-blocking view of one history pool.
 
         Returns (messages, errors, fetching, has_cache, generation, history).
         """
+        key = normalize_history(history)
         with self._cache_lock:
-            has_cache = self._cache is not None
-            messages = list(self._cache or [])
-            errors = list(self._cache_errors)
-            fetching = self._fetching
-            generation = self._fetch_generation
-            history = self._cache_history
-        return messages, errors, fetching, has_cache, generation, history
+            pool = self._pools[key]
+            has_cache = pool.messages is not None
+            messages = list(pool.messages or [])
+            errors = list(pool.errors)
+            fetching = pool.fetching
+            generation = pool.generation
+        return messages, errors, fetching, has_cache, generation, key
 
-    def _publish_cache(
+    def pool_flags(self) -> dict:
+        """Status bits for both pools (for UI banner / readiness)."""
+        with self._cache_lock:
+            recent = self._pools[HISTORY_RECENT]
+            full = self._pools[HISTORY_FULL]
+            return {
+                'recent_ready': recent.messages is not None,
+                'recent_fetching': recent.fetching,
+                'full_ready': full.messages is not None and not full.fetching,
+                'full_fetching': full.fetching,
+                'full_has_cache': full.messages is not None,
+            }
+
+    def all_cached_messages(self) -> list[MessageInfo]:
+        """Messages from both pools, deduped by account/folder/uid."""
+        with self._cache_lock:
+            seen: set[tuple[str, str, int]] = set()
+            out: list[MessageInfo] = []
+            for key in (HISTORY_RECENT, HISTORY_FULL):
+                for m in self._pools[key].messages or []:
+                    ref = (m.account_key, m.folder, m.uid)
+                    if ref in seen:
+                        continue
+                    seen.add(ref)
+                    out.append(m)
+            return out
+
+    def _publish_pool(
         self,
+        history: str,
         messages: list[MessageInfo],
         errors: list[str],
-        history: str | None = None,
     ):
+        key = normalize_history(history)
         with self._cache_lock:
-            self._cache = list(messages)
-            self._cache_errors = list(errors)
-            if history is not None:
-                self._cache_history = history
+            pool = self._pools[key]
+            pool.messages = list(messages)
+            pool.errors = list(errors)
 
     def fetch_all(
         self,
@@ -202,36 +249,32 @@ class MailService:
         since = None if full_history else recent_since_date()
 
         with self._cache_lock:
-            if self._cache is not None and not force and not self._fetching:
-                cached = list(self._cache)
-                errors = list(self._cache_errors)
-                have = self._cache_history
-                # Full cache satisfies a recent request (optionally trimmed).
-                if have == HISTORY_FULL or have == want_history:
-                    if progress_cb:
-                        progress_cb({
-                            'done': total,
-                            'total': total,
-                            'current': None,
-                            'account_key': None,
-                            'cached': True,
-                            'history': have,
-                        })
-                    if want_history == HISTORY_RECENT and have == HISTORY_FULL:
-                        return filter_messages_since(cached, recent_since_date()), errors
-                    return cached, errors
-                # Recent cache cannot satisfy a full-history request — fall through.
+            pool = self._pools[want_history]
+            if pool.messages is not None and not force and not pool.fetching:
+                cached = list(pool.messages)
+                errors = list(pool.errors)
+                if progress_cb:
+                    progress_cb({
+                        'done': total,
+                        'total': total,
+                        'current': None,
+                        'account_key': None,
+                        'cached': True,
+                        'history': want_history,
+                        'full_history': full_history,
+                    })
+                return cached, errors
 
         messages: list[MessageInfo] = []
         errors: list[str] = []
         with self._cache_lock:
-            self._fetching = True
-            self._fetch_generation += 1
-            generation = self._fetch_generation
-            # Fresh list so the UI fills as accounts complete.
-            self._cache = []
-            self._cache_errors = []
-            self._cache_history = want_history
+            pool = self._pools[want_history]
+            pool.fetching = True
+            pool.generation += 1
+            generation = pool.generation
+            # Fresh list for this pool only — the other pool stays intact.
+            pool.messages = []
+            pool.errors = []
 
         if progress_cb:
             progress_cb({
@@ -248,8 +291,8 @@ class MailService:
         try:
             for i, acc in enumerate(accounts):
                 with self._cache_lock:
-                    if generation != self._fetch_generation:
-                        # A newer force-fetch superseded this run.
+                    if generation != self._pools[want_history].generation:
+                        # A newer force-fetch for this pool superseded this run.
                         break
                 if progress_cb:
                     progress_cb({
@@ -275,7 +318,7 @@ class MailService:
                         messages.extend(inbox)
                         # Publish inbox immediately so the UI can show groups
                         # before a huge Archive folder is scanned.
-                        self._publish_cache(messages, errors, want_history)
+                        self._publish_pool(want_history, messages, errors)
                         if progress_cb:
                             progress_cb({
                                 'done': i,
@@ -286,6 +329,7 @@ class MailService:
                                 'total_messages': len(messages),
                                 'generation': generation,
                                 'history': want_history,
+                                'full_history': full_history,
                             })
                         if client.archive_folder:
                             archived = client.list_messages(
@@ -294,7 +338,7 @@ class MailService:
                                 since=since,
                             )
                             messages.extend(archived)
-                            self._publish_cache(messages, errors, want_history)
+                            self._publish_pool(want_history, messages, errors)
                         # Close after each account so we don't hold ~15 idle IMAP
                         # sessions (providers drop them → NONAUTH on reuse).
                         self._drop_client_unlocked(acc.key)
@@ -311,12 +355,13 @@ class MailService:
                             'total_messages': len(messages),
                             'generation': generation,
                             'history': want_history,
+                            'full_history': full_history,
                         })
                 except Exception as e:
                     errors.append(f'{acc.key}: {_friendly_error(acc, e)}')
                     with self._imap_lock:
                         self._drop_client_unlocked(acc.key)
-                    self._publish_cache(messages, errors, want_history)
+                    self._publish_pool(want_history, messages, errors)
                     if progress_cb:
                         progress_cb({
                             'done': i + 1,
@@ -328,17 +373,19 @@ class MailService:
                             'total_messages': len(messages),
                             'generation': generation,
                             'history': want_history,
+                            'full_history': full_history,
                         })
                 # Brief pause between accounts to reduce provider rate-limits
                 if i + 1 < total:
                     time.sleep(0.35)
 
-            self._publish_cache(messages, errors, want_history)
+            self._publish_pool(want_history, messages, errors)
             return messages, errors
         finally:
             with self._cache_lock:
-                if generation == self._fetch_generation:
-                    self._fetching = False
+                pool = self._pools[want_history]
+                if generation == pool.generation:
+                    pool.fetching = False
 
     def messages_for_refs(
         self,
