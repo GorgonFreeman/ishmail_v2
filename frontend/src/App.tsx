@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import type { Job } from './api'
 import { EmailDetailPage } from './EmailDetailPage'
 import { InboxPage } from './InboxPage'
 import { SenderPage } from './SenderPage'
@@ -15,12 +16,66 @@ const queryClient = new QueryClient({
   },
 })
 
+const ACTION_LABELS: Record<string, string> = {
+  delete: 'Delete',
+  archive: 'Archive',
+  star: 'Star',
+  unstar: 'Unstar',
+  unsubscribe: 'Unsubscribe',
+  'delete-sender': 'Delete sender',
+  fetch: 'Fetch',
+}
+
+function jobLabel(job: Job) {
+  if (job.kind === 'fetch') {
+    const full = job.progress?.full_history === true || job.progress?.history === 'full'
+    return full ? 'Load all time' : 'Load 6 months'
+  }
+  return ACTION_LABELS[job.kind] || job.kind
+}
+
+function JobToast({ jobs }: { jobs: Job[] }) {
+  if (!jobs.length) return null
+
+  // Prefer action jobs over fetch noise in the primary slot.
+  const sorted = [...jobs].sort((a, b) => {
+    const aFetch = a.kind === 'fetch' ? 1 : 0
+    const bFetch = b.kind === 'fetch' ? 1 : 0
+    return aFetch - bFetch
+  })
+
+  return (
+    <div className="jobToast">
+      {sorted.map(j => {
+        const done = typeof j.progress?.done === 'number' ? j.progress.done : null
+        const total = typeof j.progress?.total === 'number' ? j.progress.total : null
+        const current =
+          typeof j.progress?.current === 'string' && j.progress.current
+            ? j.progress.current
+            : null
+        return (
+          <div key={j.id} className={`jobItem status-${j.status}`}>
+            <strong>{jobLabel(j)}</strong>
+            <span>{j.status}</span>
+            {done != null && total != null && total > 0 && (
+              <span>{done}/{total}</span>
+            )}
+            {current && <span className="jobCurrent">{current}</span>}
+            {j.error && <span className="jobError">{j.error.split('\n')[0]}</span>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function Shell() {
   const { data, isLoading, error } = useAccounts()
-  const { activeJobs, watch } = useTrackJob()
+  const { activeJobs, watch, registerAction } = useTrackJob()
   const {
-    fetchJob,
-    fetching,
+    recentFetchJob,
+    fullFetchJob,
+    recentFetching,
     fullFetching,
     ready,
     refresh,
@@ -30,23 +85,7 @@ function Shell() {
 
   return (
     <div className="appShell">
-      {activeJobs.length > 0 && (
-        <div className="jobToast">
-          {activeJobs.map(j => (
-            <div key={j.id} className={`jobItem status-${j.status}`}>
-              <strong>{j.kind}</strong>
-              <span>{j.status}</span>
-              {j.progress && typeof j.progress.done === 'number' && (
-                <span>{String(j.progress.done)}/{String(j.progress.total ?? '?')}</span>
-              )}
-              {typeof j.progress?.current === 'string' && j.progress.current && (
-                <span className="jobCurrent">{String(j.progress.current)}</span>
-              )}
-              {j.error && <span className="jobError">{j.error.split('\n')[0]}</span>}
-            </div>
-          ))}
-        </div>
-      )}
+      <JobToast jobs={activeJobs} />
 
       {isLoading && <div className="emptyState">Loading accounts…</div>}
       {error && (
@@ -62,14 +101,14 @@ function Shell() {
               <InboxPage
                 accounts={accounts}
                 watch={watch}
-                fetchJob={fetchJob}
-                fetching={fetching}
+                registerAction={registerAction}
+                recentFetchJob={recentFetchJob}
+                fullFetchJob={fullFetchJob}
+                recentFetching={recentFetching}
                 fullFetching={fullFetching}
                 mailReady={ready}
-                onRefresh={(fullHistory = false) =>
-                  refresh.mutateAsync({ fullHistory })
-                }
-                refreshPending={refresh.isPending || fetching}
+                onRefresh={() => refresh.mutateAsync()}
+                refreshPending={refresh.isPending || recentFetching}
                 onLoadFullHistory={() => loadFullHistory.mutateAsync()}
                 loadFullHistoryPending={loadFullHistory.isPending}
               />
@@ -91,6 +130,7 @@ function Shell() {
               <EmailDetailPage
                 accounts={accounts}
                 watch={watch}
+                registerAction={registerAction}
                 mailReady={ready}
               />
             }

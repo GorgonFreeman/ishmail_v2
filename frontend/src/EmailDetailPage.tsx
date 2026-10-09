@@ -3,12 +3,13 @@ import { Letter } from 'react-letter'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import type { Account, EmailGroup, Job, Message, MessageRef } from './api'
 import { AccountPickerModal } from './Modal'
-import { useEmails, useMailActions, useMessageDetail } from './hooks'
+import { useInboxEmails, useMailActions, useMessageDetail } from './hooks'
 import './EmailDetail.css'
 
 type Props = {
   accounts: Account[],
   watch: (job: Job) => void,
+  registerAction?: (job: Job, action: string, messages: MessageRef[]) => void,
   mailReady: boolean,
 }
 
@@ -29,14 +30,13 @@ function msgKey(m: Message | MessageRef) {
   return `${m.account_key}|${m.folder}|${m.uid}`
 }
 
-export function EmailDetailPage({ accounts, watch, mailReady }: Props) {
+export function EmailDetailPage({ accounts, watch, registerAction, mailReady }: Props) {
   const { groupId = '' } = useParams()
   const [params] = useSearchParams()
   const archived = params.get('archived') === 'true'
-  const historyView = params.get('history') === 'full' ? 'full' as const : 'recent' as const
   const navigate = useNavigate()
-  const { data, isLoading, error } = useEmails(archived, '', historyView, mailReady)
-  const { startAction } = useMailActions(watch)
+  const { emails, isLoading, error } = useInboxEmails(archived, '', mailReady)
+  const { startAction } = useMailActions(watch, registerAction)
   const [showAll, setShowAll] = useState(false)
   const [modal, setModal] = useState<null | {
     title: string,
@@ -47,8 +47,8 @@ export function EmailDetailPage({ accounts, watch, mailReady }: Props) {
   }>(null)
 
   const group = useMemo(
-    () => data?.emails.find(e => e.id === groupId) ?? null,
-    [data, groupId],
+    () => emails.find(e => e.id === groupId) ?? null,
+    [emails, groupId],
   )
 
   const primary = useMemo(() => {

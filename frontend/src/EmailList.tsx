@@ -17,7 +17,6 @@ type RowProps = {
   group: EmailGroup,
   selected: boolean,
   archivedView: boolean,
-  historyView?: 'recent' | 'full',
   onToggle: () => void,
   onAction: (action: string, group: EmailGroup) => void,
 }
@@ -26,14 +25,12 @@ export function EmailRow({
   group,
   selected,
   archivedView,
-  historyView = 'recent',
   onToggle,
   onAction,
 }: RowProps) {
   const senderLabel = group.from_name || group.from_email
   const params = new URLSearchParams()
   if (archivedView) params.set('archived', 'true')
-  if (historyView === 'full') params.set('history', 'full')
   const qs = params.toString()
   const detailTo = `/email/${encodeURIComponent(group.id)}${qs ? `?${qs}` : ''}`
 
@@ -75,7 +72,6 @@ type ListProps = {
   emails: EmailGroup[],
   selectedIds: Set<string>,
   archivedView?: boolean,
-  historyView?: 'recent' | 'full',
   onToggle: (id: string) => void,
   onAction: (action: string, group: EmailGroup) => void,
 }
@@ -84,7 +80,6 @@ export function EmailList({
   emails,
   selectedIds,
   archivedView = false,
-  historyView = 'recent',
   onToggle,
   onAction,
 }: ListProps) {
@@ -99,7 +94,6 @@ export function EmailList({
           group={g}
           selected={selectedIds.has(g.id)}
           archivedView={archivedView}
-          historyView={historyView}
           onToggle={() => onToggle(g.id)}
           onAction={onAction}
         />

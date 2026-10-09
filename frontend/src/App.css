@@ -289,6 +289,16 @@ body {
   cursor: default;
 }
 
+.historyBannerStatic {
+  cursor: default;
+  opacity: 0.85;
+  border-style: dashed;
+}
+
+.bootState {
+  margin-top: 2.5rem;
+}
+
 .fetchProgressBanner .fetchProgress {
   margin: 0;
   width: 100%;
