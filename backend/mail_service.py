@@ -250,8 +250,16 @@ class MailService:
 
         with self._cache_lock:
             pool = self._pools[want_history]
-            if pool.messages is not None and not force and not pool.fetching:
-                cached = list(pool.messages)
+            # An empty pool with account errors is not a usable cache — refetch
+            # so a transient DNS/auth blip doesn't stick forever.
+            usable_cache = (
+                pool.messages is not None
+                and not force
+                and not pool.fetching
+                and (len(pool.messages) > 0 or not pool.errors)
+            )
+            if usable_cache:
+                cached = list(pool.messages or [])
                 errors = list(pool.errors)
                 if progress_cb:
                     progress_cb({

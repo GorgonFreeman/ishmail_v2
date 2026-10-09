@@ -72,6 +72,7 @@ type ListProps = {
   emails: EmailGroup[],
   selectedIds: Set<string>,
   archivedView?: boolean,
+  emptyMessage?: string,
   onToggle: (id: string) => void,
   onAction: (action: string, group: EmailGroup) => void,
 }
@@ -80,11 +81,12 @@ export function EmailList({
   emails,
   selectedIds,
   archivedView = false,
+  emptyMessage = 'No emails match this view.',
   onToggle,
   onAction,
 }: ListProps) {
   if (!emails.length) {
-    return <div className="emptyState">No emails match this view.</div>
+    return <div className="emptyState">{emptyMessage}</div>
   }
   return (
     <div className="emailList">

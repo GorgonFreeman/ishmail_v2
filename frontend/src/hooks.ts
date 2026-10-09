@@ -316,7 +316,8 @@ export function useFetchMail(watch: (job: Job) => void, activeJobs: Job[]) {
   useEffect(() => {
     if (bootstrapped.current) return
     bootstrapped.current = true
-    startFetch(false, false).catch(() => setReady(true))
+    // Force on cold boot so a prior empty/error cache cannot short-circuit load.
+    startFetch(true, false).catch(() => setReady(true))
   }, [startFetch])
 
   const recentFetchJob =

@@ -284,6 +284,13 @@ export function InboxPage({
           emails={emails}
           selectedIds={selectedIds}
           archivedView={archived}
+          emptyMessage={
+            errors.length
+              ? 'Couldn’t load mail from any account. Check the errors above, then Refresh.'
+              : search
+                ? 'No emails match this search.'
+                : 'No emails in this view.'
+          }
           onToggle={toggle}
           onAction={onRowAction}
         />
