@@ -1,3 +1,5 @@
+import { useWindowVirtualizer } from '@tanstack/react-virtual'
+import { memo, useLayoutEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { EmailGroup, Message } from './api'
 import './EmailList.css'
@@ -21,7 +23,7 @@ type RowProps = {
   onAction: (action: string, group: EmailGroup) => void,
 }
 
-export function EmailRow({
+export const EmailRow = memo(function EmailRow({
   group,
   selected,
   archivedView,
@@ -66,7 +68,7 @@ export function EmailRow({
       </div>
     </div>
   )
-}
+})
 
 type ListProps = {
   emails: EmailGroup[],
@@ -77,6 +79,8 @@ type ListProps = {
   onAction: (action: string, group: EmailGroup) => void,
 }
 
+const ROW_ESTIMATE = 52
+
 export function EmailList({
   emails,
   selectedIds,
@@ -85,21 +89,62 @@ export function EmailList({
   onToggle,
   onAction,
 }: ListProps) {
+  const listRef = useRef<HTMLDivElement>(null)
+  const [scrollMargin, setScrollMargin] = useState(0)
+
+  useLayoutEffect(() => {
+    setScrollMargin(listRef.current?.offsetTop ?? 0)
+  }, [emails.length])
+
+  const virtualizer = useWindowVirtualizer({
+    count: emails.length,
+    estimateSize: () => ROW_ESTIMATE,
+    overscan: 16,
+    scrollMargin,
+  })
+
   if (!emails.length) {
     return <div className="emptyState">{emptyMessage}</div>
   }
+
+  const items = virtualizer.getVirtualItems()
+
   return (
-    <div className="emailList">
-      {emails.map(g => (
-        <EmailRow
-          key={g.id}
-          group={g}
-          selected={selectedIds.has(g.id)}
-          archivedView={archivedView}
-          onToggle={() => onToggle(g.id)}
-          onAction={onAction}
-        />
-      ))}
+    <div
+      ref={listRef}
+      className="emailList"
+      style={{
+        height: `${virtualizer.getTotalSize()}px`,
+        width: '100%',
+        position: 'relative',
+      }}
+    >
+      {items.map((item) => {
+        const g = emails[item.index]
+        return (
+          <div
+            key={g.id}
+            data-index={item.index}
+            ref={virtualizer.measureElement}
+            className="emailListItem"
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              transform: `translateY(${item.start - scrollMargin}px)`,
+            }}
+          >
+            <EmailRow
+              group={g}
+              selected={selectedIds.has(g.id)}
+              archivedView={archivedView}
+              onToggle={() => onToggle(g.id)}
+              onAction={onAction}
+            />
+          </div>
+        )
+      })}
     </div>
   )
 }

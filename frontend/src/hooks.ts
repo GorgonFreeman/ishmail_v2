@@ -1,13 +1,13 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   api,
   type EmailGroup,
+  type EmailGroupDetail,
   type Job,
   type Message,
   type MessageRef,
 } from './api'
-import { mergeEmailGroups } from './merge_emails'
 
 export type HistoryMode = 'recent' | 'full'
 
@@ -51,14 +51,12 @@ function patchEmailsCache(
           const primary = [...remaining].sort((a, b) =>
             b.date.localeCompare(a.date),
           )[0]
+          // List messages are slim — keep group subject/from, refresh date only.
           return {
             ...g,
             messages: remaining,
             duplicate_count: remaining.length,
             flagged: remaining.some(m => m.flagged),
-            subject: primary.subject,
-            from_email: primary.from_email,
-            from_name: primary.from_name,
             date: primary.date,
             account_keys: [...new Set(remaining.map(m => m.account_key))].sort(),
           }
@@ -95,62 +93,83 @@ function patchEmailsCache(
   })
 }
 
-/** Recent list + optional full pool, merged client-side when full is ready. */
-export function useInboxEmails(archived: boolean, q: string, enabled = true) {
-  const recent = useQuery({
-    queryKey: ['emails', archived, q, 'recent'],
-    queryFn: () => api.emails({
-      archived,
-      q: q || undefined,
-      history: 'recent',
-    }),
+/** Lightweight pool flags — poll this instead of re-grouping /api/emails. */
+export function usePoolStatus(enabled = true) {
+  return useQuery({
+    queryKey: ['poolStatus'],
+    queryFn: () => api.status('recent'),
     enabled,
-    placeholderData: keepPreviousData,
-    // Only poll for full_fetching / full_ready flags — not to stream rows.
     refetchInterval: (query) => (
       query.state.data?.full_fetching ? 1_500 : 60_000
     ),
   })
+}
 
-  const fullReady = Boolean(recent.data?.full_ready)
-  const full = useQuery({
-    queryKey: ['emails', archived, q, 'full'],
+/**
+ * Single history pool for the list: full when ready, else recent.
+ * No client merge — recent ⊂ full once all-time is loaded.
+ */
+export function useInboxEmails(archived: boolean, q: string, enabled = true) {
+  const queryClient = useQueryClient()
+  const status = usePoolStatus(enabled)
+  const fullReady = Boolean(status.data?.full_ready)
+  const fullFetching = Boolean(status.data?.full_fetching)
+  const history: HistoryMode = fullReady ? 'full' : 'recent'
+  const qKey = q.trim()
+
+  const wasFullReady = useRef(false)
+  useEffect(() => {
+    if (fullReady && !wasFullReady.current) {
+      queryClient.invalidateQueries({ queryKey: ['emails'] })
+    }
+    wasFullReady.current = fullReady
+  }, [fullReady, queryClient])
+
+  const list = useQuery({
+    queryKey: ['emails', archived, qKey, history],
     queryFn: () => api.emails({
       archived,
-      q: q || undefined,
-      history: 'full',
+      q: qKey || undefined,
+      history,
     }),
-    enabled: enabled && fullReady,
+    enabled,
     placeholderData: keepPreviousData,
     staleTime: 60_000,
+    refetchInterval: 60_000,
   })
 
-  const emails = useMemo(() => {
-    const recentEmails = recent.data?.emails || []
-    const fullEmails = full.data?.emails
-    if (!fullEmails?.length) return recentEmails
-    return mergeEmailGroups(recentEmails, fullEmails)
-  }, [recent.data?.emails, full.data?.emails])
-
-  const totalMessages = useMemo(() => {
-    if (full.data?.emails?.length) {
-      return emails.reduce((n, g) => n + g.messages.length, 0)
-    }
-    return recent.data?.total_messages ?? emails.length
-  }, [emails, full.data?.emails?.length, recent.data?.total_messages])
+  const emails = list.data?.emails || []
+  const totalMessages = list.data?.total_messages
+    ?? emails.reduce((n, g) => n + g.messages.length, 0)
 
   return {
     emails,
     totalMessages,
-    errors: recent.data?.errors || [],
-    isLoading: recent.isLoading,
-    isFetching: recent.isFetching || full.isFetching,
-    error: recent.error || full.error,
+    errors: list.data?.errors || status.data?.errors || [],
+    isLoading: list.isLoading,
+    isFetching: list.isFetching,
+    error: list.error,
     fullReady,
-    fullFetching: Boolean(recent.data?.full_fetching),
-    showingAllTime: Boolean(full.data?.emails?.length),
-    data: recent.data,
+    fullFetching,
+    showingAllTime: fullReady,
+    history,
+    data: list.data,
   }
+}
+
+/** One group with full per-message fields (detail page). */
+export function useEmailGroup(
+  groupId: string | undefined,
+  archived: boolean,
+  history: HistoryMode = 'recent',
+  enabled = true,
+) {
+  return useQuery<EmailGroupDetail>({
+    queryKey: ['group', groupId, archived, history],
+    queryFn: () => api.group(groupId!, { archived, history }),
+    enabled: Boolean(groupId) && enabled,
+    staleTime: 60_000,
+  })
 }
 
 /** @deprecated Prefer useInboxEmails for the main list. */
@@ -169,11 +188,8 @@ export function useEmails(
     }),
     enabled,
     placeholderData: keepPreviousData,
-    refetchInterval: (query) => {
-      const d = query.state.data
-      if (d?.full_fetching) return 1_500
-      return 60_000
-    },
+    staleTime: 60_000,
+    refetchInterval: 60_000,
   })
 }
 
@@ -254,17 +270,23 @@ export function useTrackJob() {
           pendingActions.current.delete(latest.id)
           if (pending) {
             patchEmailsCache(queryClient, pending.action, pending.messages)
+            queryClient.invalidateQueries({ queryKey: ['group'] })
             queryClient.invalidateQueries({ queryKey: ['sender'] })
           } else if (latest.kind === 'fetch') {
             // One refresh when a pool finishes — not on every account tick.
             queryClient.invalidateQueries({ queryKey: ['emails'] })
+            queryClient.invalidateQueries({ queryKey: ['group'] })
+            queryClient.invalidateQueries({ queryKey: ['poolStatus'] })
           } else {
             queryClient.invalidateQueries({ queryKey: ['emails'] })
+            queryClient.invalidateQueries({ queryKey: ['group'] })
             queryClient.invalidateQueries({ queryKey: ['sender'] })
           }
         } else if (latest.status === 'failed') {
           pendingActions.current.delete(latest.id)
           queryClient.invalidateQueries({ queryKey: ['emails'] })
+          queryClient.invalidateQueries({ queryKey: ['group'] })
+          queryClient.invalidateQueries({ queryKey: ['poolStatus'] })
         }
 
         window.setTimeout(() => {

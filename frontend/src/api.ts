@@ -4,14 +4,19 @@ export type MessageRef = {
   uid: number,
 }
 
-export type Message = MessageRef & {
+/** Slim list member — subject/from live on the group header. */
+export type MessageSlim = MessageRef & {
   account_email: string,
   date: string,
+  flagged: boolean,
+  archived: boolean,
+}
+
+/** Full member (detail / sender views). */
+export type Message = MessageSlim & {
   from_email: string,
   from_name: string,
   subject: string,
-  flagged: boolean,
-  archived: boolean,
 }
 
 export type EmailGroup = {
@@ -24,8 +29,12 @@ export type EmailGroup = {
   flagged: boolean,
   archived: boolean,
   duplicate_count: number,
-  messages: Message[],
+  messages: MessageSlim[],
   account_keys: string[],
+}
+
+export type EmailGroupDetail = Omit<EmailGroup, 'messages'> & {
+  messages: Message[],
 }
 
 export type Account = {
@@ -74,8 +83,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
+export type PoolStatus = {
+  ok: boolean,
+  fetching: boolean,
+  has_cache: boolean,
+  history: 'recent' | 'full',
+  generation: number,
+  total_messages: number,
+  errors: string[],
+  full_ready: boolean,
+  full_fetching: boolean,
+}
+
 export const api = {
   accounts: () => request<{ accounts: Account[], names: string[] }>('/api/accounts'),
+  status: (history: 'recent' | 'full' = 'recent') =>
+    request<PoolStatus>(`/api/status?history=${history}`),
   emails: (opts: {
     archived: boolean,
     q?: string,
@@ -97,6 +120,18 @@ export const api = {
       full_ready?: boolean,
       full_fetching?: boolean,
     }>(`/api/emails?${params}`)
+  },
+  group: (
+    groupId: string,
+    opts: { archived?: boolean, history?: 'recent' | 'full' } = {},
+  ) => {
+    const params = new URLSearchParams({
+      archived: String(Boolean(opts.archived)),
+      history: opts.history || 'recent',
+    })
+    return request<EmailGroupDetail>(
+      `/api/groups/${encodeURIComponent(groupId)}?${params}`,
+    )
   },
   sender: (email: string, refresh = false) => {
     const params = refresh ? '?refresh=true' : ''

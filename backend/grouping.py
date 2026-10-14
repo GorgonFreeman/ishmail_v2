@@ -220,6 +220,39 @@ def assign_group_ids(subjects: list[str], names: list[str]) -> list[str]:
     return [subject_key[subject or ''] for subject in subjects]
 
 
+def filter_groups_by_query(
+    groups: list[EmailGroup],
+    query: str | None,
+) -> list[EmailGroup]:
+    """Cheap substring filter on already-built groups (subject / sender / inbox)."""
+    q = (query or '').strip().casefold()
+    if not q:
+        return list(groups)
+
+    out: list[EmailGroup] = []
+    for g in groups:
+        account_email = ''
+        for m in g.messages:
+            if (
+                m.get('subject') == g.subject
+                and m.get('from_email') == g.from_email
+                and m.get('date') == g.date
+            ):
+                account_email = m.get('account_email') or ''
+                break
+        if not account_email and g.messages:
+            account_email = g.messages[0].get('account_email') or ''
+        hay = ' '.join([
+            g.subject,
+            g.from_email,
+            g.from_name,
+            account_email,
+        ]).casefold()
+        if q in hay:
+            out.append(g)
+    return out
+
+
 def build_groups(
     messages: list[MessageInfo],
     names: list[str],
@@ -238,7 +271,6 @@ def build_groups(
     for msg, gk in zip(messages, group_ids):
         by_key[gk].append(msg)
 
-    q = (query or '').strip().casefold()
     groups: list[EmailGroup] = []
 
     for gk, members in by_key.items():
@@ -249,16 +281,6 @@ def build_groups(
         visible_sorted = sorted(visible, key=lambda m: m.date, reverse=True)
         all_sorted = sorted(members, key=lambda m: m.date, reverse=True)
         primary = visible_sorted[0]
-
-        if q:
-            hay = ' '.join([
-                primary.subject,
-                primary.from_email,
-                primary.from_name,
-                primary.account_email,
-            ]).casefold()
-            if q not in hay:
-                continue
 
         tmpl = _subject_template_prepared(primary.subject, prepared)
         normalized = (
@@ -298,4 +320,4 @@ def build_groups(
         )
 
     groups.sort(key=lambda g: g.date, reverse=True)
-    return groups
+    return filter_groups_by_query(groups, query)

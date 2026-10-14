@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from api_v1 import router as v1_router
-from grouping import build_groups
+from grouping import build_groups, filter_groups_by_query
 from jobs import queue
 from mail_service import HISTORY_FULL, HISTORY_RECENT, mail_service, normalize_history
 
@@ -106,6 +106,66 @@ def list_accounts():
 _groups_cache: dict = {}
 
 
+def _slim_message(m: dict) -> dict:
+    """List payload: drop per-message subject/from (already on the group)."""
+    return {
+        'account_key': m['account_key'],
+        'account_email': m['account_email'],
+        'folder': m['folder'],
+        'uid': m['uid'],
+        'date': m['date'],
+        'flagged': m['flagged'],
+        'archived': m['archived'],
+    }
+
+
+def _group_header(g) -> dict:
+    return {
+        'id': g.id,
+        'subject': g.subject,
+        'subject_normalized': g.subject_normalized,
+        'from_email': g.from_email,
+        'from_name': g.from_name,
+        'date': g.date,
+        'flagged': g.flagged,
+        'archived': g.archived,
+        'duplicate_count': g.duplicate_count,
+        'account_keys': g.account_keys,
+    }
+
+
+def _group_list_dict(g) -> dict:
+    return {
+        **_group_header(g),
+        'messages': [_slim_message(m) for m in g.messages],
+    }
+
+
+def _group_detail_dict(g) -> dict:
+    return {
+        **_group_header(g),
+        'messages': list(g.messages),
+    }
+
+
+def _cached_groups(messages, *, archived: bool, generation: int, history: str):
+    # Cache unfiltered groups — search is a cheap post-filter so changing q
+    # does not re-run assign_group_ids over the whole mailbox.
+    cache_key = (generation, len(messages), archived, history)
+    cached = _groups_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    groups = build_groups(
+        messages,
+        mail_service.creds.names,
+        archived_view=archived,
+        query=None,
+    )
+    _groups_cache.clear()
+    _groups_cache[cache_key] = groups
+    return groups
+
+
 def _emails_payload(
     messages,
     errors,
@@ -116,41 +176,66 @@ def _emails_payload(
     generation: int,
     history: str,
 ):
-    cache_key = (generation, len(messages), archived, q or '', history)
-    cached = _groups_cache.get(cache_key)
-    if cached is not None:
-        groups = cached
-    else:
-        groups = build_groups(
+    groups = filter_groups_by_query(
+        _cached_groups(
             messages,
-            mail_service.creds.names,
-            archived_view=archived,
-            query=q,
-        )
-        _groups_cache.clear()
-        _groups_cache[cache_key] = groups
+            archived=archived,
+            generation=generation,
+            history=history,
+        ),
+        q,
+    )
     flags = mail_service.pool_flags()
     return {
-        'emails': [
-            {
-                'id': g.id,
-                'subject': g.subject,
-                'subject_normalized': g.subject_normalized,
-                'from_email': g.from_email,
-                'from_name': g.from_name,
-                'date': g.date,
-                'flagged': g.flagged,
-                'archived': g.archived,
-                'duplicate_count': g.duplicate_count,
-                'messages': g.messages,
-                'account_keys': g.account_keys,
-            }
-            for g in groups
-        ],
+        'emails': [_group_list_dict(g) for g in groups],
         'errors': errors,
         'total_messages': len(messages),
         'fetching': fetching,
         'history': history,
+        'full_ready': flags['full_ready'],
+        'full_fetching': flags['full_fetching'],
+    }
+
+
+def _find_group(group_id: str, archived: bool, history: str = HISTORY_RECENT):
+    """Find a group across history pools / archived views (cache-backed)."""
+    tried: set[tuple[str, bool]] = set()
+    for hist in (normalize_history(history), HISTORY_FULL, HISTORY_RECENT):
+        for arch in (archived, not archived):
+            key = (hist, arch)
+            if key in tried:
+                continue
+            tried.add(key)
+            messages, _errors, fetching, has_cache, generation, hist_key = (
+                mail_service.snapshot(hist)
+            )
+            if not has_cache and not fetching:
+                continue
+            for g in _cached_groups(
+                messages,
+                archived=arch,
+                generation=generation,
+                history=hist_key,
+            ):
+                if g.id == group_id:
+                    return g
+    return None
+
+
+@app.get('/api/status')
+def api_status(history: str = Query(HISTORY_RECENT)):
+    """Lightweight pool flags for UI polling (no grouping / fat payloads)."""
+    hist = normalize_history(history)
+    messages, errors, fetching, has_cache, generation, hist = mail_service.snapshot(hist)
+    flags = mail_service.pool_flags()
+    return {
+        'ok': True,
+        'fetching': fetching,
+        'has_cache': has_cache,
+        'history': hist,
+        'generation': generation,
+        'total_messages': len(messages),
+        'errors': errors,
         'full_ready': flags['full_ready'],
         'full_fetching': flags['full_fetching'],
     }
@@ -186,6 +271,19 @@ def list_emails(
     return _emails_payload(
         [], [], archived=archived, q=q, fetching=False, generation=0, history=hist,
     )
+
+
+@app.get('/api/groups/{group_id}')
+def get_group(
+    group_id: str,
+    archived: bool = Query(False),
+    history: str = Query(HISTORY_RECENT),
+):
+    """Full group payload for the detail page (includes per-message subject/from)."""
+    group = _find_group(group_id, archived, history=history)
+    if group is None:
+        raise HTTPException(404, f'Group not found: {group_id}')
+    return _group_detail_dict(group)
 
 
 @app.get('/api/message')

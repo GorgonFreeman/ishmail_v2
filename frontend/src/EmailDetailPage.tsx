@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react'
 import { Letter } from 'react-letter'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import type { Account, EmailGroup, Job, Message, MessageRef } from './api'
+import type { Account, EmailGroupDetail, Job, Message, MessageRef } from './api'
 import { AccountPickerModal } from './Modal'
-import { useInboxEmails, useMailActions, useMessageDetail } from './hooks'
+import { useEmailGroup, useMailActions, useMessageDetail, usePoolStatus } from './hooks'
 import './EmailDetail.css'
 
 type Props = {
@@ -35,7 +35,13 @@ export function EmailDetailPage({ accounts, watch, registerAction, mailReady }: 
   const [params] = useSearchParams()
   const archived = params.get('archived') === 'true'
   const navigate = useNavigate()
-  const { emails, isLoading, error } = useInboxEmails(archived, '', mailReady)
+  const status = usePoolStatus(mailReady)
+  const history = status.data?.full_ready ? 'full' : 'recent'
+  const {
+    data: group,
+    isLoading,
+    error,
+  } = useEmailGroup(groupId, archived, history, mailReady)
   const { startAction } = useMailActions(watch, registerAction)
   const [showAll, setShowAll] = useState(false)
   const [modal, setModal] = useState<null | {
@@ -45,11 +51,6 @@ export function EmailDetailPage({ accounts, watch, registerAction, mailReady }: 
     messages: MessageRef[],
     action: string,
   }>(null)
-
-  const group = useMemo(
-    () => emails.find(e => e.id === groupId) ?? null,
-    [emails, groupId],
-  )
 
   const primary = useMemo(() => {
     if (!group?.messages.length) return null
@@ -88,7 +89,7 @@ export function EmailDetailPage({ accounts, watch, registerAction, mailReady }: 
     })
   }
 
-  const openGroupAction = (action: string, g: EmailGroup) => {
+  const openGroupAction = (action: string, g: EmailGroupDetail) => {
     openAction(action, g.messages)
   }
 

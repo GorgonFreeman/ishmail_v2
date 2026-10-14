@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, TypeVar
@@ -15,6 +16,8 @@ from unsubscribe import attempt_unsubscribe
 
 T = TypeVar('T')
 ACCOUNT_ATTEMPTS = 3
+# Cap parallel IMAP sessions — network-bound, but providers rate-limit.
+FETCH_WORKERS = 6
 # Default inbox window — full history is opt-in (slow on large Archives).
 RECENT_DAYS = 183  # ~6 months
 HISTORY_RECENT = 'recent'
@@ -69,25 +72,37 @@ class CachePool:
 class MailService:
     def __init__(self):
         self._creds: CredsConfig | None = None
+        self._creds_lock = threading.RLock()
         self._clients: dict[str, AccountClient] = {}
-        # Serialize all IMAP use — IMAPClient is not thread-safe, and the job
-        # queue can run alongside request handlers.
-        self._imap_lock = threading.RLock()
+        # One lock per account — IMAPClient is not thread-safe, but separate
+        # accounts may run in parallel (fetch workers + request handlers).
+        self._account_locks: dict[str, threading.RLock] = {}
+        self._account_locks_guard = threading.Lock()
         self._cache_lock = threading.RLock()
         self._pools: dict[str, CachePool] = {
             HISTORY_RECENT: CachePool(),
             HISTORY_FULL: CachePool(),
         }
 
+    def _lock_for(self, account_key: str) -> threading.RLock:
+        with self._account_locks_guard:
+            lock = self._account_locks.get(account_key)
+            if lock is None:
+                lock = threading.RLock()
+                self._account_locks[account_key] = lock
+            return lock
+
     def reload_creds(self) -> CredsConfig:
-        self._creds = load_creds()
-        return self._creds
+        with self._creds_lock:
+            self._creds = load_creds()
+            return self._creds
 
     @property
     def creds(self) -> CredsConfig:
-        if self._creds is None:
-            self.reload_creds()
-        return self._creds  # type: ignore
+        with self._creds_lock:
+            if self._creds is None:
+                self._creds = load_creds()
+            return self._creds
 
     def accounts(self) -> list[Account]:
         return self.creds.accounts
@@ -96,6 +111,7 @@ class MailService:
         return {a.key: a for a in self.accounts()}
 
     def _drop_client_unlocked(self, account_key: str):
+        """Caller must hold _lock_for(account_key)."""
         dead = self._clients.pop(account_key, None)
         if dead:
             try:
@@ -115,6 +131,7 @@ class MailService:
         return acc
 
     def _get_client_unlocked(self, account_key: str, force_new: bool = False) -> AccountClient:
+        """Caller must hold _lock_for(account_key)."""
         if force_new:
             self._drop_client_unlocked(account_key)
 
@@ -141,9 +158,10 @@ class MailService:
     def _with_account_retry(self, account_key: str, op: Callable[[AccountClient], T]) -> T:
         """Run an IMAP op; on flaky auth/socket errors, re-auth and retry."""
         last: BaseException | None = None
+        lock = self._lock_for(account_key)
         for attempt in range(ACCOUNT_ATTEMPTS):
             try:
-                with self._imap_lock:
+                with lock:
                     if attempt > 0:
                         self._fresh_account(account_key)
                         client = self._get_client_unlocked(account_key, force_new=True)
@@ -152,7 +170,7 @@ class MailService:
                     return op(client)
             except Exception as e:
                 last = e
-                with self._imap_lock:
+                with lock:
                     self._drop_client_unlocked(account_key)
                 if not is_retriable_imap_error(e) or attempt + 1 >= ACCOUNT_ATTEMPTS:
                     raise
@@ -162,7 +180,7 @@ class MailService:
         raise RuntimeError('unreachable')
 
     def get_client(self, account_key: str) -> AccountClient:
-        with self._imap_lock:
+        with self._lock_for(account_key):
             return self._get_client_unlocked(account_key)
 
     def get_message_detail(self, account_key: str, folder: str, uid: int) -> dict:
@@ -273,8 +291,11 @@ class MailService:
                     })
                 return cached, errors
 
-        messages: list[MessageInfo] = []
+        parts: dict[str, list[MessageInfo]] = {}
         errors: list[str] = []
+        done_count = 0
+        progress_lock = threading.Lock()
+
         with self._cache_lock:
             pool = self._pools[want_history]
             pool.fetching = True
@@ -283,6 +304,44 @@ class MailService:
             # Fresh list for this pool only — the other pool stays intact.
             pool.messages = []
             pool.errors = []
+
+        def rebuild_messages() -> list[MessageInfo]:
+            # Caller holds _cache_lock.
+            out: list[MessageInfo] = []
+            for a in accounts:
+                out.extend(parts.get(a.key, []))
+            return out
+
+        def publish() -> list[MessageInfo] | None:
+            with self._cache_lock:
+                pool = self._pools[want_history]
+                if generation != pool.generation:
+                    return None
+                messages = rebuild_messages()
+                pool.messages = list(messages)
+                pool.errors = list(errors)
+                return messages
+
+        def emit_progress(payload: dict):
+            if not progress_cb:
+                return
+            with progress_lock:
+                progress_cb(payload)
+
+        def superseded() -> bool:
+            with self._cache_lock:
+                return generation != self._pools[want_history].generation
+
+        def merge_account(acc_key: str, local: list[MessageInfo]) -> int:
+            with self._cache_lock:
+                pool = self._pools[want_history]
+                if generation != pool.generation:
+                    return -1
+                parts[acc_key] = list(local)
+                messages = rebuild_messages()
+                pool.messages = list(messages)
+                pool.errors = list(errors)
+                return len(messages)
 
         if progress_cb:
             progress_cb({
@@ -294,101 +353,125 @@ class MailService:
                 'history': want_history,
                 'full_history': full_history,
                 'since': since.isoformat() if since else None,
+                'workers': min(FETCH_WORKERS, max(1, total)),
             })
 
-        try:
-            for i, acc in enumerate(accounts):
-                with self._cache_lock:
-                    if generation != self._pools[want_history].generation:
-                        # A newer force-fetch for this pool superseded this run.
-                        break
-                if progress_cb:
-                    progress_cb({
-                        'done': i,
-                        'total': total,
-                        'current': acc.email,
-                        'account_key': acc.key,
-                        'generation': generation,
-                        'history': want_history,
-                        'full_history': full_history,
-                    })
-                try:
-                    # Snapshot length so a mid-account retry can't duplicate msgs.
-                    base_len = len(messages)
+        def fetch_account(acc: Account):
+            nonlocal done_count
+            if superseded():
+                return
 
-                    def _fetch_one(client: AccountClient):
-                        del messages[base_len:]
-                        inbox = client.list_messages(
-                            client.inbox_folder,
-                            archived=False,
+            with progress_lock:
+                started_done = done_count
+            emit_progress({
+                'done': started_done,
+                'total': total,
+                'current': acc.email,
+                'account_key': acc.key,
+                'generation': generation,
+                'history': want_history,
+                'full_history': full_history,
+            })
+
+            local: list[MessageInfo] = []
+            try:
+                def _fetch_one(client: AccountClient):
+                    # Local list so a mid-account retry can't leave duplicates.
+                    local.clear()
+                    inbox = client.list_messages(
+                        client.inbox_folder,
+                        archived=False,
+                        since=since,
+                    )
+                    local.extend(inbox)
+                    # Publish inbox immediately so the UI can show groups
+                    # before a huge Archive folder is scanned.
+                    total_messages = merge_account(acc.key, local)
+                    if total_messages >= 0:
+                        with progress_lock:
+                            mid_done = done_count
+                        emit_progress({
+                            'done': mid_done,
+                            'total': total,
+                            'current': acc.email,
+                            'account_key': acc.key,
+                            'phase': 'inbox',
+                            'total_messages': total_messages,
+                            'generation': generation,
+                            'history': want_history,
+                            'full_history': full_history,
+                        })
+                    if client.archive_folder:
+                        archived = client.list_messages(
+                            client.archive_folder,
+                            archived=True,
                             since=since,
                         )
-                        messages.extend(inbox)
-                        # Publish inbox immediately so the UI can show groups
-                        # before a huge Archive folder is scanned.
-                        self._publish_pool(want_history, messages, errors)
-                        if progress_cb:
-                            progress_cb({
-                                'done': i,
-                                'total': total,
-                                'current': acc.email,
-                                'account_key': acc.key,
-                                'phase': 'inbox',
-                                'total_messages': len(messages),
-                                'generation': generation,
-                                'history': want_history,
-                                'full_history': full_history,
-                            })
-                        if client.archive_folder:
-                            archived = client.list_messages(
-                                client.archive_folder,
-                                archived=True,
-                                since=since,
-                            )
-                            messages.extend(archived)
-                            self._publish_pool(want_history, messages, errors)
-                        # Close after each account so we don't hold ~15 idle IMAP
-                        # sessions (providers drop them → NONAUTH on reuse).
-                        self._drop_client_unlocked(acc.key)
+                        local.extend(archived)
+                        merge_account(acc.key, local)
+                    # Close after each account so we don't hold many idle IMAP
+                    # sessions (providers drop them → NONAUTH on reuse).
+                    self._drop_client_unlocked(acc.key)
 
-                    self._with_account_retry(acc.key, _fetch_one)
-                    if progress_cb:
-                        progress_cb({
-                            'done': i + 1,
-                            'total': total,
-                            'current': acc.email,
-                            'account_key': acc.key,
-                            'ok': True,
-                            'phase': 'done',
-                            'total_messages': len(messages),
-                            'generation': generation,
-                            'history': want_history,
-                            'full_history': full_history,
-                        })
-                except Exception as e:
+                self._with_account_retry(acc.key, _fetch_one)
+                messages = publish()
+                with progress_lock:
+                    done_count += 1
+                    finished = done_count
+                emit_progress({
+                    'done': finished,
+                    'total': total,
+                    'current': acc.email,
+                    'account_key': acc.key,
+                    'ok': True,
+                    'phase': 'done',
+                    'total_messages': len(messages or []),
+                    'generation': generation,
+                    'history': want_history,
+                    'full_history': full_history,
+                })
+            except Exception as e:
+                with self._cache_lock:
                     errors.append(f'{acc.key}: {_friendly_error(acc, e)}')
-                    with self._imap_lock:
-                        self._drop_client_unlocked(acc.key)
-                    self._publish_pool(want_history, messages, errors)
-                    if progress_cb:
-                        progress_cb({
-                            'done': i + 1,
-                            'total': total,
-                            'current': acc.email,
-                            'account_key': acc.key,
-                            'ok': False,
-                            'error': str(e),
-                            'total_messages': len(messages),
-                            'generation': generation,
-                            'history': want_history,
-                            'full_history': full_history,
-                        })
-                # Brief pause between accounts to reduce provider rate-limits
-                if i + 1 < total:
-                    time.sleep(0.35)
+                with self._lock_for(acc.key):
+                    self._drop_client_unlocked(acc.key)
+                messages = publish()
+                with progress_lock:
+                    done_count += 1
+                    finished = done_count
+                emit_progress({
+                    'done': finished,
+                    'total': total,
+                    'current': acc.email,
+                    'account_key': acc.key,
+                    'ok': False,
+                    'error': str(e),
+                    'total_messages': len(messages or []),
+                    'generation': generation,
+                    'history': want_history,
+                    'full_history': full_history,
+                })
 
-            self._publish_pool(want_history, messages, errors)
-            return messages, errors
+        try:
+            if total == 0:
+                publish()
+                return [], []
+
+            workers = min(FETCH_WORKERS, total)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(fetch_account, acc) for acc in accounts]
+                for fut in as_completed(futures):
+                    # Surface unexpected worker failures (logic bugs).
+                    fut.result()
+
+            messages = publish()
+            if messages is None:
+                with self._cache_lock:
+                    return (
+                        list(self._pools[want_history].messages or []),
+                        list(errors),
+                    )
+            return messages, list(errors)
         finally:
             with self._cache_lock:
                 pool = self._pools[want_history]
@@ -454,7 +537,7 @@ class MailService:
                     'ok': True,
                 })
             except Exception as e:
-                with self._imap_lock:
+                with self._lock_for(account_key):
                     self._drop_client_unlocked(account_key)
                 results.append({
                     'account_key': account_key,
@@ -529,7 +612,7 @@ class MailService:
                         'detail': detail,
                     })
             except Exception as e:
-                with self._imap_lock:
+                with self._lock_for(account_key):
                     self._drop_client_unlocked(account_key)
                 results.append({
                     'account_key': account_key,
